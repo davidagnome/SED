@@ -2943,15 +2943,15 @@ Var
     obj: TObject;
     fx, fy, fz, pch, yaw, rol: double;
 begin
-    if (LastSelXY.X = X) and (LastSelXY.X = X) and (renderer.Selected.Count <> 0)
+    if (LastSelXY.X = X) and (LastSelXY.Y = Y) and (renderer.Selected.Count <> 0)
     then
     begin
         if fore then
             if csel >= renderer.Selected.Count - 1 then
                 csel := 0
             else
-                Inc(csel);
-        if not fore then
+                Inc(csel)
+        else
             if csel = 0 then
                 csel := renderer.Selected.Count - 1
             else
@@ -8826,11 +8826,13 @@ begin
             end;
         MM_FR:
             if Cur_FR = -1 then
-                with level.lights[Cur_LT] do
+                with level.things[Cur_TH] do
                 begin
-                    cx := position.x;
-                    cy := position.y;
-                    cz := position.z;
+                    cx := x;
+                    cy := y;
+                    cz := z;
+                    cpch := pch;
+                    cyaw := yaw;
                 end
             else
                 level.things[Cur_TH].Vals[Cur_FR].GetFrame(cx, cy, cz,
