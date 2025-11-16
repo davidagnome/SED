@@ -12,12 +12,50 @@ begin
            [@w1,@w1,@ntype,@nmesh,@parent,@w1,@w1,@w1,@x,@y,@z,@pch,@yaw,@rol,@pivotx,@pivoty,@pivotz,@nodename]);
 end;
 
-Function HNodeToString(node:THNode;n:integer):string;
-begin
- With node do
- Result:=  Format('%2d:     0x0    0x%x    %2d     %2d      %2d     %2d       %2d     %3.6f %3.6f %3.6f  %4.6f %4.6f %4.6f %4.6f %4.6f %4.6f %s',
+Function HNodeToString(node: THNode; n: integer; nodes: THNodes):string;
 
-           [n,            ntype, nmesh,  parent,     0,      0,       0,     x,      y,    z,    pch,   yaw,  rol, pivotx,pivoty, pivotz,nodename]);
+  var
+    firstChild: Integer;
+    nextSibling: Integer;
+    childCount: Integer;
+    i: Integer;
+
+begin
+  firstChild  := -1;
+  nextSibling := -1;
+  childCount  := 0;
+
+  // Compute relationships on the fly
+  // Find first child and count children
+  // Thanks Eebs!
+  for i := 0 to nodes.Count - 1 do
+  begin
+    if nodes[i].parent = n then
+    begin
+      childCount := childCount + 1;
+      if firstChild = -1 then
+      begin
+        firstChild := i;
+      end;
+    end;
+  end;
+
+  // Find next sibling
+  if node.parent <> -1 then
+  begin
+    for i := n + 1 to nodes.Count - 1 do
+    begin
+      if nodes[i].parent = node.parent then
+      begin
+        nextSibling := i;
+        Break;
+      end;
+    end;
+  end;
+
+  With node do
+  Result:=  Format('%2d:     0x0    0x%x    %2d     %2d      %2d     %2d       %2d     %3.6f %3.6f %3.6f  %4.6f %4.6f %4.6f %4.6f %4.6f %4.6f %s',
+                    [n,             ntype, nmesh,  parent,   firstChild, nextSibling, childCount,      x,    y,    z,     pch,  yaw,  rol,  pivotx, pivoty, pivotz, nodename]);
 
 end;
 

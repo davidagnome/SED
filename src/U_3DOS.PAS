@@ -80,7 +80,7 @@ Procedure Free3DO(var a3DO: T3DO);
 { These function must be use to load and free
   3DOs, not T3DO.CreateFrom3DO, T3Do.Free }
 Procedure StringToHNode(const s: string; node: THNode);
-Function HNodeToString(node: THNode; n: integer): string;
+Function HNodeToString(node: THNode; n: integer; nodes: THNodes): string;
 
 implementation
 

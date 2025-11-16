@@ -188,7 +188,7 @@ begin
  for i:=0 to hnodes.count-1 do
  With hnodes[i] do
  begin
-  Writeln(t,HNodeToString(hnodes[i],i));
+  Writeln(t,HNodeToString(hnodes[i],i, hnodes));
  end;
 
  closefile(t);

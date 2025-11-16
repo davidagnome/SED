@@ -1097,7 +1097,7 @@ Try
  WriteS('SEC: HIERARCHYDEF');
  WriteFmt('NODES %d',[h3donodes.count]);
  for i:=0 to h3donodes.count-1 do
-  WriteS(HNodeToString(h3donodes[i],i));
+  WriteS(HNodeToString(h3donodes[i],i, h3donodes));
  WriteS('END');
 
 
