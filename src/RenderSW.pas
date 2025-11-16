@@ -811,9 +811,9 @@ begin
   vz := WinZ * 1000;
 
   MultVM3s(rmx, vx, vy, vz);
-  x := (vx / ppunit / DpiScale) - cdx;
-  y := (vy / ppunit / DpiScale) - cdy;
-  Z := (vz / ppunit / DpiScale) - cdz;
+  x := (vx / ppunit * DpiScale) - cdx;
+  y := (vy / ppunit * DpiScale) - cdy;
+  Z := (vz / ppunit * DpiScale) - cdz;
 end;
 
 Procedure TSFTRenderer.ProjectPoint(x, y, Z: double; Var WinX, WinY: integer);
