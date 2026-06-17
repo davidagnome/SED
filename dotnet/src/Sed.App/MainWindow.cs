@@ -1,5 +1,6 @@
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Input;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Platform.Storage;
@@ -46,7 +47,10 @@ public class MainWindow : Window
             Text = "WASD/QE to fly, drag to look, click to select. Game ▸ Set folder, or File ▸ Open.",
             VerticalAlignment = VerticalAlignment.Center,
         };
-        _view = new VulkanView(SampleScene.CreateCube()) { Picked = OnPicked };
+        _view = new VulkanView(SampleScene.CreateCube())
+        {
+            SelectionChanged = desc => _status.Text = desc ?? "Nothing selected",
+        };
 
         _sidePanelHeader = new TextBlock { Margin = new Thickness(10, 8), Text = "No game configured", Foreground = Brushes.Gray };
         _levelList = new ListBox { Background = Brushes.Transparent };
@@ -248,13 +252,6 @@ public class MainWindow : Window
         };
     }
 
-    private void OnPicked(PickResult? hit)
-    {
-        if (hit is null) { _status.Text = "No surface under cursor"; return; }
-        var mat = string.IsNullOrEmpty(hit.Surface.Material) ? "(no material)" : hit.Surface.Material;
-        _status.Text = $"Picked: sector {hit.Sector.Num}, surface {hit.Surface.Num} — {mat} (dist {hit.Distance:0.0})";
-    }
-
     private void ClearSession()
     {
         _install?.Dispose(); _install = null;
@@ -279,6 +276,23 @@ public class MainWindow : Window
         file.Items.Add(new Separator());
         file.Items.Add(exit);
 
+        var undo = new MenuItem { Header = "_Undo", InputGesture = new KeyGesture(Key.Z, KeyModifiers.Control) };
+        undo.Click += (_, _) => _view.History.Undo();
+        var redo = new MenuItem { Header = "_Redo", InputGesture = new KeyGesture(Key.Y, KeyModifiers.Control) };
+        redo.Click += (_, _) => _view.History.Redo();
+        var edit = new MenuItem { Header = "_Edit" };
+        edit.Items.Add(undo);
+        edit.Items.Add(redo);
+        _view.History.Changed += () =>
+        {
+            undo.IsEnabled = _view.History.CanUndo;
+            redo.IsEnabled = _view.History.CanRedo;
+            undo.Header = _view.History.CanUndo ? $"_Undo {_view.History.UndoName}" : "_Undo";
+            redo.Header = _view.History.CanRedo ? $"_Redo {_view.History.RedoName}" : "_Redo";
+        };
+        undo.IsEnabled = false;
+        redo.IsEnabled = false;
+
         var game = new MenuItem { Header = "_Game" };
         foreach (var (label, kind) in Games)
         {
@@ -294,6 +308,7 @@ public class MainWindow : Window
 
         var menu = new Menu();
         menu.Items.Add(file);
+        menu.Items.Add(edit);
         menu.Items.Add(game);
         menu.Items.Add(view);
         menu.Items.Add(help);

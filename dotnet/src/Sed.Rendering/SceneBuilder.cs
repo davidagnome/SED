@@ -32,6 +32,12 @@ public static class SceneBuilder
             foreach (var surface in sector.Surfaces)
             {
                 if (surface.Corners.Count < 3) continue;
+
+                // Surfaces without a material are adjoin portals / sky: in-game they
+                // are invisible openings, so skip them rather than drawing solid
+                // walls that occlude the rooms beyond.
+                if (string.IsNullOrEmpty(surface.Material)) continue;
+
                 surface.RecalcNormal();
                 var normal = surface.Normal;
 
@@ -66,6 +72,49 @@ public static class SceneBuilder
             });
         }
         return scene;
+    }
+
+    /// <summary>Builds a mesh of small cubes at each thing's position (for visible markers).</summary>
+    public static Mesh BuildThingMarkers(Level level, double size, ColorF color)
+    {
+        var mesh = new Mesh();
+        foreach (var thing in level.Things)
+            AppendCube(mesh, thing.Position, size, color);
+        return mesh;
+    }
+
+    /// <summary>Builds a single marker cube (e.g. for highlighting a selected thing).</summary>
+    public static Mesh BuildMarker(Vec3 center, double size, ColorF color)
+    {
+        var mesh = new Mesh();
+        AppendCube(mesh, center, size, color);
+        return mesh;
+    }
+
+    private static void AppendCube(Mesh mesh, Vec3 c, double h, ColorF color)
+    {
+        Vec3[] p =
+        {
+            c + new Vec3(-h, -h, -h), c + new Vec3(h, -h, -h), c + new Vec3(h, h, -h), c + new Vec3(-h, h, -h),
+            c + new Vec3(-h, -h, h), c + new Vec3(h, -h, h), c + new Vec3(h, h, h), c + new Vec3(-h, h, h),
+        };
+        int[][] faces =
+        {
+            new[] { 0, 1, 2, 3 }, new[] { 4, 5, 6, 7 }, new[] { 0, 1, 5, 4 },
+            new[] { 3, 2, 6, 7 }, new[] { 0, 3, 7, 4 }, new[] { 1, 2, 6, 5 },
+        };
+        foreach (var f in faces)
+        {
+            var n = (p[f[1]] - p[f[0]]).Cross(p[f[2]] - p[f[0]]).Normalized();
+            mesh.AddTriangle(
+                new MeshVertex(p[f[0]], n, color),
+                new MeshVertex(p[f[1]], n, color),
+                new MeshVertex(p[f[2]], n, color));
+            mesh.AddTriangle(
+                new MeshVertex(p[f[0]], n, color),
+                new MeshVertex(p[f[2]], n, color),
+                new MeshVertex(p[f[3]], n, color));
+        }
     }
 
     private static MeshVertex Vertex(Surface.Corner c, Vec3 normal)

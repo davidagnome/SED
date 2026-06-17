@@ -37,6 +37,13 @@ public sealed unsafe class SceneRenderer : IDisposable
     private DeviceMemory _selIndexMemory;
     private uint _selIndexCount;
 
+    // Thing markers (depth-tested, white texture, vertex-colored)
+    private VkBuffer _markerVertexBuffer;
+    private DeviceMemory _markerVertexMemory;
+    private VkBuffer _markerIndexBuffer;
+    private DeviceMemory _markerIndexMemory;
+    private uint _markerIndexCount;
+
     // Persistent 1x1 white fallback texture.
     private GpuTexture _white;
 
@@ -60,7 +67,8 @@ public sealed unsafe class SceneRenderer : IDisposable
     private VkBuffer _readback;
     private DeviceMemory _readbackMem;
 
-    private readonly record struct DrawItem(DescriptorSet Set, uint IndexOffset, uint IndexCount);
+    private readonly record struct DrawItem(DescriptorSet Set, uint IndexOffset, uint IndexCount, float InvW, float InvH);
+    private readonly record struct MatTex(DescriptorSet Set, float InvW, float InvH);
 
     private struct GpuTexture
     {
@@ -109,26 +117,26 @@ public sealed unsafe class SceneRenderer : IDisposable
         CreateDescriptorPool((uint)scene.Submeshes.Count + 1);
         _white.Set = AllocateTextureDescriptor(_white.View);
 
-        var materialSets = new Dictionary<string, DescriptorSet>(StringComparer.OrdinalIgnoreCase);
+        var materials = new Dictionary<string, MatTex>(StringComparer.OrdinalIgnoreCase);
         foreach (var sub in scene.Submeshes)
         {
-            DescriptorSet set;
+            MatTex mt;
             if (string.IsNullOrEmpty(sub.Material))
-                set = _white.Set;
-            else if (!materialSets.TryGetValue(sub.Material, out set))
+                mt = new MatTex(_white.Set, 1f, 1f);
+            else if (!materials.TryGetValue(sub.Material, out mt))
             {
                 var tex = lookup(sub.Material);
-                if (tex is { } t && t.Rgba.Length == t.Width * t.Height * 4)
+                if (tex is { } t && t.Rgba.Length == t.Width * t.Height * 4 && t.Width > 0 && t.Height > 0)
                 {
                     var gpu = CreateTextureImage(t.Rgba, (uint)t.Width, (uint)t.Height);
                     gpu.Set = AllocateTextureDescriptor(gpu.View);
                     _sceneTextures.Add(gpu);
-                    set = gpu.Set;
+                    mt = new MatTex(gpu.Set, 1f / t.Width, 1f / t.Height);
                 }
-                else set = _white.Set;
-                materialSets[sub.Material] = set;
+                else mt = new MatTex(_white.Set, 1f, 1f);
+                materials[sub.Material] = mt;
             }
-            _draws.Add(new DrawItem(set, (uint)sub.IndexOffset, (uint)sub.IndexCount));
+            _draws.Add(new DrawItem(mt.Set, (uint)sub.IndexOffset, (uint)sub.IndexCount, mt.InvW, mt.InvH));
         }
     }
 
@@ -147,6 +155,23 @@ public sealed unsafe class SceneRenderer : IDisposable
         (_selIndexBuffer, _selIndexMemory) = CreateHostBuffer(
             (ulong)(indices.Length * sizeof(uint)), BufferUsageFlags.IndexBufferBit);
         Upload(_selIndexMemory, MemoryMarshal.AsBytes<uint>(indices));
+    }
+
+    /// <summary>Sets (or clears) depth-tested marker geometry (e.g. thing markers).</summary>
+    public void SetMarkers(Mesh? mesh)
+    {
+        DestroyMarkers();
+        if (mesh is null || mesh.IsEmpty) { _markerIndexCount = 0; return; }
+
+        var verts = mesh.Vertices.ToArray();
+        var indices = mesh.Indices.ToArray();
+        _markerIndexCount = (uint)indices.Length;
+        (_markerVertexBuffer, _markerVertexMemory) = CreateHostBuffer(
+            (ulong)(verts.Length * (int)MeshVertex.Stride), BufferUsageFlags.VertexBufferBit);
+        Upload(_markerVertexMemory, MemoryMarshal.AsBytes<MeshVertex>(verts));
+        (_markerIndexBuffer, _markerIndexMemory) = CreateHostBuffer(
+            (ulong)(indices.Length * sizeof(uint)), BufferUsageFlags.IndexBufferBit);
+        Upload(_markerIndexMemory, MemoryMarshal.AsBytes<uint>(indices));
     }
 
     /// <summary>Renders one frame and returns tightly-packed RGBA8 pixels.</summary>
@@ -191,8 +216,23 @@ public sealed unsafe class SceneRenderer : IDisposable
             {
                 var set = draw.Set;
                 _vk.CmdBindDescriptorSets(cmd, PipelineBindPoint.Graphics, _layout, 0, 1, in set, 0, null);
+                PushInvTexSize(cmd, draw.InvW, draw.InvH);
                 _vk.CmdDrawIndexed(cmd, draw.IndexCount, 1, draw.IndexOffset, 0, 0);
             }
+        }
+
+        // Thing markers (depth-tested, white texture, vertex-colored).
+        if (_markerIndexCount > 0 && _white.Set.Handle != 0)
+        {
+            _vk.CmdBindPipeline(cmd, PipelineBindPoint.Graphics, _pipeline);
+            var set = _white.Set;
+            _vk.CmdBindDescriptorSets(cmd, PipelineBindPoint.Graphics, _layout, 0, 1, in set, 0, null);
+            PushInvTexSize(cmd, 1f, 1f);
+            var vb = _markerVertexBuffer;
+            ulong offset = 0;
+            _vk.CmdBindVertexBuffers(cmd, 0, 1, in vb, in offset);
+            _vk.CmdBindIndexBuffer(cmd, _markerIndexBuffer, 0, IndexType.Uint32);
+            _vk.CmdDrawIndexed(cmd, _markerIndexCount, 1, 0, 0, 0);
         }
 
         // Selection overlay (depth-test off, white texture, bright per-vertex color).
@@ -201,6 +241,7 @@ public sealed unsafe class SceneRenderer : IDisposable
             _vk.CmdBindPipeline(cmd, PipelineBindPoint.Graphics, _selectionPipeline);
             var set = _white.Set;
             _vk.CmdBindDescriptorSets(cmd, PipelineBindPoint.Graphics, _layout, 0, 1, in set, 0, null);
+            PushInvTexSize(cmd, 1f, 1f);
             var vb = _selVertexBuffer;
             ulong offset = 0;
             _vk.CmdBindVertexBuffers(cmd, 0, 1, in vb, in offset);
@@ -228,6 +269,13 @@ public sealed unsafe class SceneRenderer : IDisposable
         new Span<byte>(mapped, size).CopyTo(pixels);
         _vk.UnmapMemory(_dev.Device, _readbackMem);
         return pixels;
+    }
+
+    /// <summary>Pushes the per-material inverse texture size (push-constant offset 64).</summary>
+    private void PushInvTexSize(CommandBuffer cmd, float invW, float invH)
+    {
+        var inv = stackalloc float[2] { invW, invH };
+        _vk.CmdPushConstants(cmd, _layout, ShaderStageFlags.VertexBit, 64, 8, inv);
     }
 
     // ---- pipeline / descriptors ----
@@ -429,7 +477,7 @@ public sealed unsafe class SceneRenderer : IDisposable
                 DynamicStateCount = 2, PDynamicStates = dynamicStates,
             };
 
-            var pushRange = new PushConstantRange(ShaderStageFlags.VertexBit, 0, 64);
+            var pushRange = new PushConstantRange(ShaderStageFlags.VertexBit, 0, 72); // mat4 + vec2
             var setLayout = _setLayout;
             var layoutInfo = new PipelineLayoutCreateInfo
             {
@@ -704,6 +752,16 @@ public sealed unsafe class SceneRenderer : IDisposable
         _selIndexCount = 0;
     }
 
+    private void DestroyMarkers()
+    {
+        var d = _dev.Device;
+        if (_markerVertexBuffer.Handle != 0) { _vk.DestroyBuffer(d, _markerVertexBuffer, null); _markerVertexBuffer = default; }
+        if (_markerVertexMemory.Handle != 0) { _vk.FreeMemory(d, _markerVertexMemory, null); _markerVertexMemory = default; }
+        if (_markerIndexBuffer.Handle != 0) { _vk.DestroyBuffer(d, _markerIndexBuffer, null); _markerIndexBuffer = default; }
+        if (_markerIndexMemory.Handle != 0) { _vk.FreeMemory(d, _markerIndexMemory, null); _markerIndexMemory = default; }
+        _markerIndexCount = 0;
+    }
+
     private void DestroyScene()
     {
         var d = _dev.Device;
@@ -735,6 +793,7 @@ public sealed unsafe class SceneRenderer : IDisposable
     {
         DestroyScene();
         DestroySelection();
+        DestroyMarkers();
         DestroyTargets();
         DestroyTexture(_white);
         var d = _dev.Device;

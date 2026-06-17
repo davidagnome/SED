@@ -9,6 +9,9 @@ public readonly record struct Ray(Vec3 Origin, Vec3 Direction);
 /// <summary>The surface hit by a pick ray, with its sector and hit distance/point.</summary>
 public sealed record PickResult(Sector Sector, Surface Surface, double Distance, Vec3 Point);
 
+/// <summary>A thing hit by a pick ray (sphere test around the thing's position).</summary>
+public sealed record ThingHit(Thing Thing, double Distance);
+
 /// <summary>
 /// Ray casting for viewport selection: builds a pick ray from a screen pixel and
 /// the camera, and finds the nearest surface a ray strikes (Möller–Trumbore over
@@ -57,6 +60,38 @@ public static class Picker
             }
         }
         return best;
+    }
+
+    /// <summary>Finds the nearest thing whose marker sphere (radius) the ray hits, or null.</summary>
+    public static ThingHit? PickThing(Level level, Ray ray, double radius)
+    {
+        ThingHit? best = null;
+        foreach (var thing in level.Things)
+        {
+            if (RaySphere(ray, thing.Position, radius, out double t) &&
+                (best is null || t < best.Distance))
+            {
+                best = new ThingHit(thing, t);
+            }
+        }
+        return best;
+    }
+
+    /// <summary>Ray/sphere intersection; returns the nearest positive hit distance.</summary>
+    public static bool RaySphere(Ray ray, Vec3 center, double radius, out double t)
+    {
+        t = 0;
+        var oc = ray.Origin - center;
+        double b = oc.Dot(ray.Direction);
+        double c = oc.Dot(oc) - radius * radius;
+        double disc = b * b - c;
+        if (disc < 0) return false;
+
+        double sqrt = System.Math.Sqrt(disc);
+        double t0 = -b - sqrt;
+        double t1 = -b + sqrt;
+        t = t0 > Epsilon ? t0 : t1;
+        return t > Epsilon;
     }
 
     /// <summary>Möller–Trumbore ray/triangle intersection (double-sided).</summary>

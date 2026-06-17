@@ -56,6 +56,19 @@ using var device = VulkanDevice.Create(ctx);
 using var renderer = new SceneRenderer(device);
 renderer.SetScene(scene, Lookup);
 Console.WriteLine($"  materials resolved {ok}/{total}");
+
+// Thing markers (cyan cubes) + highlight the thing nearest the screen centre.
+double markerSize = radius * 0.012;
+renderer.SetMarkers(SceneBuilder.BuildThingMarkers(level, markerSize, new ColorF(0.2f, 0.9f, 1f)));
+var centreRay = Picker.ScreenPointToRay(camera, W / 2.0, H / 2.0, W, H);
+var pickedThing = Picker.PickThing(level, centreRay, markerSize * 4);
+if (pickedThing is not null)
+{
+    Console.WriteLine($"  centre thing: #{pickedThing.Thing.Num} '{pickedThing.Thing.Name}'");
+    renderer.SetSelection(SceneBuilder.BuildMarker(pickedThing.Thing.Position, markerSize * 1.4,
+        new ColorF(1f, 0.9f, 0.2f)));
+}
+
 PngWriter.Write(outPath, renderer.Render(mvp, W, H), (int)W, (int)H);
 Console.WriteLine($"Rendered → {Path.GetFullPath(outPath)}");
 return 0;

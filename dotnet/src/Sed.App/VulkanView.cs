@@ -4,6 +4,7 @@ using Avalonia.Input;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Threading;
+using Sed.Core.Editing;
 using Sed.Core.Math;
 using Sed.Core.Model;
 using Sed.Rendering;
@@ -40,8 +41,16 @@ public sealed class VulkanView : Control
     private Point _pressOrigin;
     private bool _dragging;
 
-    /// <summary>Raised when the user clicks; argument is the picked surface or null.</summary>
-    public Action<PickResult?>? Picked;
+    // Selection + editing
+    private double _markerSize = 0.1;
+    private Thing? _selectedThing;
+    private Surface? _selectedSurface;
+
+    /// <summary>Undo/redo history for edits made in this viewport.</summary>
+    public EditHistory History { get; } = new();
+
+    /// <summary>Raised when the selection changes; argument is a human-readable description (or null).</summary>
+    public Action<string?>? SelectionChanged;
 
     public VulkanView(Level level)
     {
@@ -60,6 +69,7 @@ public sealed class VulkanView : Control
         Focusable = true;
         _moveTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(16) };
         _moveTimer.Tick += (_, _) => MoveTick();
+        History.Changed += OnHistoryChanged;
         SetLevel(level);
     }
 
@@ -67,14 +77,39 @@ public sealed class VulkanView : Control
     {
         if (_renderer is null) return;
         _level = level;
+        _selectedThing = null;
+        _selectedSurface = null;
         _renderer.SetSelection(null);
+        History.Clear();
+
         if (textures is not null)
             _renderer.SetScene(SceneBuilder.BuildScene(level), textures);
         else
             _renderer.SetMesh(SceneBuilder.FromLevel(level));
 
         FrameLevel(level);
+        _markerSize = System.Math.Max(0.02, _moveSpeed * 0.5);
+        RefreshMarkers();
         RenderFrame();
+    }
+
+    private static readonly ColorF MarkerColor = new(0.2f, 0.9f, 1f);   // cyan things
+    private static readonly ColorF SelectColor = new(1f, 0.9f, 0.2f);   // yellow selection
+
+    private void RefreshMarkers()
+    {
+        if (_renderer is null || _level is null) return;
+        _renderer.SetMarkers(_level.Things.Count > 0
+            ? SceneBuilder.BuildThingMarkers(_level, _markerSize, MarkerColor)
+            : null);
+    }
+
+    private void OnHistoryChanged()
+    {
+        RefreshMarkers();
+        UpdateSelectionHighlight();
+        RenderFrame();
+        SelectionChanged?.Invoke(SelectionText());
     }
 
     private Camera Cam() => new()
@@ -144,12 +179,46 @@ public sealed class VulkanView : Control
 
     protected override void OnKeyDown(KeyEventArgs e)
     {
+        if (e.KeyModifiers.HasFlag(KeyModifiers.Control))
+        {
+            if (e.Key == Key.Z && e.KeyModifiers.HasFlag(KeyModifiers.Shift)) { History.Redo(); e.Handled = true; return; }
+            if (e.Key == Key.Z) { History.Undo(); e.Handled = true; return; }
+            if (e.Key == Key.Y) { History.Redo(); e.Handled = true; return; }
+        }
+
+        if (_selectedThing is not null && TryThingMoveDelta(e.Key, out var delta))
+        {
+            History.Do(new MoveThingCommand(_selectedThing, delta));
+            e.Handled = true;
+            return;
+        }
+
         if (IsMoveKey(e.Key))
         {
             _pressed.Add(e.Key);
             if (!_moveTimer.IsEnabled) _moveTimer.Start();
             e.Handled = true;
         }
+    }
+
+    private bool TryThingMoveDelta(Key key, out Vec3 delta)
+    {
+        delta = Vec3.Zero;
+        double step = System.Math.Max(_markerSize * 2, _moveSpeed);
+        var cam = Cam();
+        var fwd = new Vec3(cam.Forward.X, cam.Forward.Y, 0).Normalized();
+        var right = new Vec3(cam.Right.X, cam.Right.Y, 0).Normalized();
+        switch (key)
+        {
+            case Key.Right: delta = right * step; break;
+            case Key.Left: delta = right * -step; break;
+            case Key.Up: delta = fwd * step; break;
+            case Key.Down: delta = fwd * -step; break;
+            case Key.PageUp: delta = Camera.Up * step; break;
+            case Key.PageDown: delta = Camera.Up * -step; break;
+            default: return false;
+        }
+        return true;
     }
 
     protected override void OnKeyUp(KeyEventArgs e)
@@ -227,24 +296,58 @@ public sealed class VulkanView : Control
         if (_renderer is null || _level is null || _lastSize.Width < 1) return;
         double scale = TopLevel.GetTopLevel(this)?.RenderScaling ?? 1.0;
         var ray = Picker.ScreenPointToRay(Cam(), p.X * scale, p.Y * scale, _lastSize.Width, _lastSize.Height);
-        var hit = Picker.Pick(_level, ray);
 
-        _renderer.SetSelection(hit is null ? null : BuildSelectionMesh(hit.Surface));
+        var surfaceHit = Picker.Pick(_level, ray);
+        var thingHit = Picker.PickThing(_level, ray, _markerSize * 1.8);
+
+        _selectedThing = null;
+        _selectedSurface = null;
+        if (thingHit is not null && (surfaceHit is null || thingHit.Distance <= surfaceHit.Distance))
+            _selectedThing = thingHit.Thing;
+        else
+            _selectedSurface = surfaceHit?.Surface;
+
+        UpdateSelectionHighlight();
         RenderFrame();
-        Picked?.Invoke(hit);
+        SelectionChanged?.Invoke(SelectionText());
     }
 
-    private static Mesh BuildSelectionMesh(Surface surface)
+    private void UpdateSelectionHighlight()
+    {
+        if (_renderer is null) return;
+        if (_selectedThing is not null)
+            _renderer.SetSelection(SceneBuilder.BuildMarker(_selectedThing.Position, _markerSize * 1.3, SelectColor));
+        else if (_selectedSurface is not null)
+            _renderer.SetSelection(BuildSurfaceHighlight(_selectedSurface));
+        else
+            _renderer.SetSelection(null);
+    }
+
+    private string SelectionText()
+    {
+        if (_selectedThing is { } t)
+        {
+            var name = t.Name.Length > 0 ? t.Name : "?";
+            return $"Thing #{t.Num} '{name}' @ {t.Position}  — arrows/PgUp-PgDn to move, Ctrl+Z undo";
+        }
+        if (_selectedSurface is { } s)
+        {
+            var mat = string.IsNullOrEmpty(s.Material) ? "(no material)" : s.Material;
+            return $"Sector {s.Sector.Num}, surface {s.Num} — {mat}";
+        }
+        return "Nothing selected";
+    }
+
+    private static Mesh BuildSurfaceHighlight(Surface surface)
     {
         var mesh = new Mesh();
-        var color = new ColorF(1f, 0.9f, 0.2f); // bright yellow
         var n = surface.Normal;
         var c0 = surface.Corners[0].Vertex.Position;
         for (int i = 1; i + 1 < surface.Corners.Count; i++)
             mesh.AddTriangle(
-                new MeshVertex(c0, n, color),
-                new MeshVertex(surface.Corners[i].Vertex.Position, n, color),
-                new MeshVertex(surface.Corners[i + 1].Vertex.Position, n, color));
+                new MeshVertex(c0, n, SelectColor),
+                new MeshVertex(surface.Corners[i].Vertex.Position, n, SelectColor),
+                new MeshVertex(surface.Corners[i + 1].Vertex.Position, n, SelectColor));
         return mesh;
     }
 

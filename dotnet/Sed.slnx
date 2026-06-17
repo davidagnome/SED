@@ -13,6 +13,7 @@
     <Project Path="tools/Sed.AppShot/Sed.AppShot.csproj" />
     <Project Path="tools/Sed.GameProbe/Sed.GameProbe.csproj" />
     <Project Path="tools/Sed.GobTool/Sed.GobTool.csproj" />
+    <Project Path="tools/Sed.InteriorProbe/Sed.InteriorProbe.csproj" />
     <Project Path="tools/Sed.JklProbe/Sed.JklProbe.csproj" />
     <Project Path="tools/Sed.LevelRender/Sed.LevelRender.csproj" />
     <Project Path="tools/Sed.MatTool/Sed.MatTool.csproj" />

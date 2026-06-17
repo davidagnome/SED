@@ -17,12 +17,12 @@ math. See the repo-root analysis for the full option comparison (Lazarus/LCL vs
 
 | Project | Role | Status |
 |---|---|---|
-| `Sed.Core` | Math (double-precision `Vec2/3`, `ColorF`, `Box`) + domain model (`Level`, `Sector`, `Surface`, `Vertex`, `Thing`, `Light`, `Cog`, `LevelHeader`) | ✅ builds, unit-tested |
+| `Sed.Core` | Math + domain model + **`Editing/` (`EditHistory` undo/redo, `MoveThingCommand`)** | ✅ unit-tested |
 | `Sed.Formats` | **JKL** (`Jkl/`), **GOB** (`Gob/`), **MAT/CMP** (`Material/`), **`Game/GameInstall`** (per-game base dir → resource GOBs) | ✅ validated on retail data |
 | `Sed.Core` | + `Mat4` (column-major, Vulkan-clip perspective/lookat) | ✅ 9 tests |
 | `Sed.Rendering` | `Camera` (+ fly basis), `Mesh`, `SceneBuilder`, `TextureLookup`, **`Picker`** (screen→ray, ray/triangle, nearest surface), `PngWriter` | ✅ |
 | `Sed.Rendering.Vulkan` | Silk.NET backend; textured `SceneRenderer` (descriptor-set textures, depth, MVP) + **depth-off selection-highlight overlay** | ✅ verified on M4 Pro |
-| `Sed.App` | Avalonia shell + `VulkanView` (fly camera + click-pick); **Game menu configures per-game install dirs (`AppSettings`), auto-loads levels+textures from the base folder**; File ▸ Open for loose .jkl/.gob | ✅ |
+| `Sed.App` | Avalonia shell + `VulkanView` (fly camera, click-pick **surfaces & things**, arrow-keys move selected thing, **Edit ▸ Undo/Redo**); Game menu (per-game install dirs) + File ▸ Open | ✅ |
 | `tools/Sed.GobTool`, `Sed.JklProbe`, `Sed.MatTool`, `Sed.LevelRender` | GOB list / JKL render / MAT→PNG / **textured level → PNG** | ✅ |
 | `tools/Sed.VulkanSmoke`, `Sed.TriangleProbe`, `Sed.SceneProbe`, `Sed.AppShot` | bring-up + capture probes | ✅ |
 | `tests/Sed.Core.Tests` | xUnit | ✅ 19 passing |
@@ -101,10 +101,13 @@ length, char[128] name }. Names use `\` separators (e.g. `jkl\01narshadda.jkl`).
      `09fuelstation` (966 sectors), `14tower` render textured (`Sed.LevelRender`).
      Preview lighting biases intensity toward bright (JK bakes most light into
      the colormap tables, so raw vertex intensities are near-zero — `SceneBuilder.Light`).
-8. ~~Fly camera navigation + surface picking~~ ✅ `Picker` (unit-tested) +
-   `VulkanView` fly controls + `SceneRenderer.SetSelection` highlight. **Next:**
-   thing picking/placement, then editing (move verts/surfaces) + undo.
-   Later: real colormap-table lighting, transparency/alpha materials, 3DO models.
+8. ~~Fly nav + surface picking~~ ✅
+9. ~~Thing markers + thing picking + move-with-undo/redo~~ ✅ `Picker.PickThing`
+   (ray/sphere), `SceneRenderer.SetMarkers` (depth-tested cyan cubes),
+   `EditHistory`/`MoveThingCommand`, arrow-key move + Ctrl+Z/Y + Edit menu.
+   **Next:** geometry editing (move vertices/surfaces) on the same command
+   pattern; thing creation/deletion; then real colormap lighting, transparency,
+   3DO model rendering (477 `.3do` in Res2.gob) so things show as real objects.
 
 ### MAT / CMP formats (from `src/graph_files.pas`)
 
@@ -128,6 +131,16 @@ case-insensitively in `Episode/` and `Resource/` (the original's FindGobJK/FindG
 `AppSettings` (Sed.App) persists the dirs as JSON under the OS app-data dir
 (macOS: `~/Library/Application Support/SED/settings.json`). The app auto-opens a
 configured game on startup. Material lookups search the resource archives.
+
+### Texture coordinates (important)
+
+JK stores surface texture-vertex UVs in **texel** units, not 0..1. The renderer
+normalizes per material: `uv01 = texelUV / materialPixelSize` (matches
+`PRENDER.PAS`: `vd.u = u / tx.width`). `SceneRenderer` pushes `invTexSize =
+(1/w, 1/h)` per submesh as a push constant and the vertex shader applies it.
+Surface `uscale/vscale` are *not* applied at render time — the stored UVs already
+encode scaling. No-material surfaces (adjoin portals / sky) are skipped in
+`SceneBuilder.BuildScene`.
 
 ### JKL format notes (from `src/LEVEL_IO.INC`)
 
