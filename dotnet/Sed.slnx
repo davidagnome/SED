@@ -1,0 +1,14 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Sed.Core/Sed.Core.csproj" />
+    <Project Path="src/Sed.Formats/Sed.Formats.csproj" />
+    <Project Path="src/Sed.Rendering.Vulkan/Sed.Rendering.Vulkan.csproj" />
+    <Project Path="src/Sed.Rendering/Sed.Rendering.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Sed.Core.Tests/Sed.Core.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tools/">
+    <Project Path="tools/Sed.VulkanSmoke/Sed.VulkanSmoke.csproj" />
+  </Folder>
+</Solution>
