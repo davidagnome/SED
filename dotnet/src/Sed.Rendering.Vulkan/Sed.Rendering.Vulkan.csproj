@@ -6,6 +6,25 @@
   </ItemGroup>
 
   <ItemGroup>
+    <EmbeddedResource Include="Shaders\*.spv" />
+  </ItemGroup>
+
+  <!-- Recompile GLSL -> SPIR-V when glslangValidator is available; the checked-in
+       .spv files are used as-is otherwise (e.g. CI without the Vulkan SDK). -->
+  <Target Name="CompileShaders" BeforeTargets="BeforeBuild">
+    <PropertyGroup>
+      <Glslang Condition="Exists('/opt/homebrew/bin/glslangValidator')">/opt/homebrew/bin/glslangValidator</Glslang>
+      <Glslang Condition="'$(Glslang)'=='' And Exists('/usr/local/bin/glslangValidator')">/usr/local/bin/glslangValidator</Glslang>
+    </PropertyGroup>
+    <Exec Condition="'$(Glslang)'!=''"
+          Command="&quot;$(Glslang)&quot; -V Shaders/triangle.vert -o Shaders/triangle.vert.spv"
+          WorkingDirectory="$(MSBuildProjectDirectory)" />
+    <Exec Condition="'$(Glslang)'!=''"
+          Command="&quot;$(Glslang)&quot; -V Shaders/triangle.frag -o Shaders/triangle.frag.spv"
+          WorkingDirectory="$(MSBuildProjectDirectory)" />
+  </Target>
+
+  <ItemGroup>
     <PackageReference Include="Silk.NET.Core" Version="2.23.0" />
     <PackageReference Include="Silk.NET.Vulkan" Version="2.23.0" />
     <PackageReference Include="Silk.NET.Vulkan.Extensions.KHR" Version="2.23.0" />
