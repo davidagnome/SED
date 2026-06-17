@@ -34,14 +34,13 @@ foreach (var t in level.Things.Take(8))
 
 var palette = MaterialLibrary.LoadPalette(level.ColorMaps, install.ResourceArchives.ToArray());
 var library = new MaterialLibrary(palette, install.ResourceArchives.ToArray());
-var scene = SceneBuilder.BuildScene(level);
-int emptyTris = scene.Submeshes.Where(s => string.IsNullOrEmpty(s.Material)).Sum(s => s.IndexCount / 3);
-int totalTris = scene.Submeshes.Sum(s => s.IndexCount / 3);
-int missing = 0, resolved = 0;
-foreach (var sm in scene.Submeshes.Where(s => !string.IsNullOrEmpty(s.Material)))
-    if (library.Get(sm.Material) is null) missing++; else resolved++;
-Console.WriteLine($"  submeshes={scene.Submeshes.Count}, no-material tris={emptyTris}/{totalTris}, " +
-                  $"materials resolved={resolved} missing={missing}");
+var modelLib = new Sed.Formats.ThreeDo.ModelLibrary(install.ResourceArchives.ToArray());
+var assembler = new SceneAssembler();
+assembler.AddLevel(level);
+var unmodeled = assembler.AddThings(level, modelLib.Get);
+var scene = assembler.Build();
+Console.WriteLine($"  things with models: {level.Things.Count - unmodeled.Count}/{level.Things.Count}, " +
+                  $"submeshes={scene.Submeshes.Count}, tris={scene.Mesh.Indices.Count / 3}");
 TextureData? Lookup(string m) { var t = library.Get(m); return t is { } r ? new TextureData(r.Width, r.Height, r.Rgba) : null; }
 
 const uint W = 720, H = 540;
@@ -50,14 +49,17 @@ using var device = VulkanDevice.Create(ctx);
 using var renderer = new SceneRenderer(device);
 renderer.SetScene(scene, Lookup);
 
-var eye = anchor.Position + new Vec3(0, 0, 0.05); // just above the placement point
-for (int i = 0; i < 4; i++)
+// Look at the anchor thing from a few offset distances so nearby models are framed.
+double[] dists = { 0.4, 0.9, 1.8 };
+for (int i = 0; i < dists.Length; i++)
 {
-    double yaw = i * System.Math.PI / 2;
-    var cam = new Camera { Position = eye, Yaw = yaw, Pitch = -0.15, FieldOfViewDegrees = 80, NearPlane = 0.01, FarPlane = 200 };
+    double d = dists[i];
+    var eye = anchor.Position + new Vec3(d * 0.8, -d, d * 0.6);
+    var cam = Camera.LookingAt(eye, anchor.Position, 75);
+    cam.NearPlane = 0.01; cam.FarPlane = 200;
     var pixels = renderer.Render(cam.ViewProjection((double)W / H), W, H);
-    var outPath = $"/tmp/interior_{levelName}_{i * 90}.png";
+    var outPath = $"/tmp/interior_{levelName}_d{i}.png";
     PngWriter.Write(outPath, pixels, (int)W, (int)H);
-    Console.WriteLine($"  yaw {i * 90,3}° → {outPath}");
+    Console.WriteLine($"  dist {d} → {outPath}");
 }
 return 0;

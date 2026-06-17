@@ -36,7 +36,14 @@ Level level = JklParser.Parse(install.ReadLevel(entry));
 
 var palette = MaterialLibrary.LoadPalette(level.ColorMaps, install.ResourceArchives.ToArray());
 var library = new MaterialLibrary(palette, install.ResourceArchives.ToArray());
-var scene = SceneBuilder.BuildScene(level);
+var models = new Sed.Formats.ThreeDo.ModelLibrary(install.ResourceArchives.ToArray());
+
+var assembler = new SceneAssembler();
+assembler.AddLevel(level);
+var unmodeled = assembler.AddThings(level, models.Get);
+var scene = assembler.Build();
+Console.WriteLine($"  things with models: {level.Things.Count - unmodeled.Count}/{level.Things.Count}");
+
 int ok = 0, total = 0;
 TextureData? Lookup(string m)
 {
@@ -57,17 +64,9 @@ using var renderer = new SceneRenderer(device);
 renderer.SetScene(scene, Lookup);
 Console.WriteLine($"  materials resolved {ok}/{total}");
 
-// Thing markers (cyan cubes) + highlight the thing nearest the screen centre.
+// Markers only for things that have no 3DO model.
 double markerSize = radius * 0.012;
-renderer.SetMarkers(SceneBuilder.BuildThingMarkers(level, markerSize, new ColorF(0.2f, 0.9f, 1f)));
-var centreRay = Picker.ScreenPointToRay(camera, W / 2.0, H / 2.0, W, H);
-var pickedThing = Picker.PickThing(level, centreRay, markerSize * 4);
-if (pickedThing is not null)
-{
-    Console.WriteLine($"  centre thing: #{pickedThing.Thing.Num} '{pickedThing.Thing.Name}'");
-    renderer.SetSelection(SceneBuilder.BuildMarker(pickedThing.Thing.Position, markerSize * 1.4,
-        new ColorF(1f, 0.9f, 0.2f)));
-}
+renderer.SetMarkers(SceneBuilder.BuildThingMarkers(unmodeled, markerSize, new ColorF(0.2f, 0.9f, 1f)));
 
 PngWriter.Write(outPath, renderer.Render(mvp, W, H), (int)W, (int)H);
 Console.WriteLine($"Rendered → {Path.GetFullPath(outPath)}");

@@ -18,9 +18,9 @@ math. See the repo-root analysis for the full option comparison (Lazarus/LCL vs
 | Project | Role | Status |
 |---|---|---|
 | `Sed.Core` | Math + domain model + **`Editing/` (`EditHistory` undo/redo, `MoveThingCommand`)** | ✅ unit-tested |
-| `Sed.Formats` | **JKL** (`Jkl/`), **GOB** (`Gob/`), **MAT/CMP** (`Material/`), **`Game/GameInstall`** (per-game base dir → resource GOBs) | ✅ validated on retail data |
+| `Sed.Formats` | **JKL** (`Jkl/`, incl. templates), **GOB** (`Gob/`), **MAT/CMP** (`Material/`), **3DO models** (`ThreeDo/`), **`Game/GameInstall`** | ✅ validated on retail data |
 | `Sed.Core` | + `Mat4` (column-major, Vulkan-clip perspective/lookat) | ✅ 9 tests |
-| `Sed.Rendering` | `Camera` (+ fly basis), `Mesh`, `SceneBuilder`, `TextureLookup`, **`Picker`** (screen→ray, ray/triangle, nearest surface), `PngWriter` | ✅ |
+| `Sed.Rendering` | `Camera`, `Mesh`, **`SceneAssembler`** (level surfaces + instanced 3DO models → material batches), `SceneBuilder`, `Picker`, `PngWriter` | ✅ |
 | `Sed.Rendering.Vulkan` | Silk.NET backend; textured `SceneRenderer` (descriptor-set textures, depth, MVP) + **depth-off selection-highlight overlay** | ✅ verified on M4 Pro |
 | `Sed.App` | Avalonia shell + `VulkanView` (fly camera, click-pick **surfaces & things**, arrow-keys move selected thing, **Edit ▸ Undo/Redo**); Game menu (per-game install dirs) + File ▸ Open | ✅ |
 | `tools/Sed.GobTool`, `Sed.JklProbe`, `Sed.MatTool`, `Sed.LevelRender` | GOB list / JKL render / MAT→PNG / **textured level → PNG** | ✅ |
@@ -102,12 +102,14 @@ length, char[128] name }. Names use `\` separators (e.g. `jkl\01narshadda.jkl`).
      Preview lighting biases intensity toward bright (JK bakes most light into
      the colormap tables, so raw vertex intensities are near-zero — `SceneBuilder.Light`).
 8. ~~Fly nav + surface picking~~ ✅
-9. ~~Thing markers + thing picking + move-with-undo/redo~~ ✅ `Picker.PickThing`
-   (ray/sphere), `SceneRenderer.SetMarkers` (depth-tested cyan cubes),
-   `EditHistory`/`MoveThingCommand`, arrow-key move + Ctrl+Z/Y + Edit menu.
-   **Next:** geometry editing (move vertices/surfaces) on the same command
-   pattern; thing creation/deletion; then real colormap lighting, transparency,
-   3DO model rendering (477 `.3do` in Res2.gob) so things show as real objects.
+9. ~~Thing markers + picking + move-with-undo/redo~~ ✅
+10. ~~3DO model rendering~~ ✅ `ThreeDo/` parser + `ModelLibrary`; thing→template
+    →`model3d` resolution (`Level.GetThingModel`); `SceneAssembler.AddThings`
+    instances models at thing pos/orientation; model-less things keep markers.
+    Verified: standalone table model + Katarn chair in-room.
+    **Next:** geometry editing (move vertices/surfaces) on the `IEditCommand`
+    pattern; thing create/delete; saving back to JKL; real colormap lighting;
+    transparency; sky rendering; rebuild model instances when a thing is moved.
 
 ### MAT / CMP formats (from `src/graph_files.pas`)
 

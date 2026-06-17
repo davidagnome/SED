@@ -10,75 +10,23 @@ namespace Sed.Rendering;
 /// </summary>
 public static class SceneBuilder
 {
-    /// <summary>
-    /// Preview lighting: bias the per-vertex intensity toward bright so geometry
-    /// is clearly visible in the editor (JK bakes much of its lighting via the
-    /// colormap light tables, so raw vertex intensities are often near-zero).
-    /// </summary>
-    private const float LightBias = 0.65f;
-    private const float LightScale = 0.6f;
-
-    /// <summary>
-    /// Builds a material-batched scene: triangles are grouped by surface material,
-    /// vertices carry the surface's UVs and per-vertex light intensity (used as a
-    /// Gouraud multiplier on the sampled texture).
-    /// </summary>
+    /// <summary>Builds a material-batched scene of the level's textured surfaces.</summary>
     public static RenderScene BuildScene(Level level)
     {
-        var byMaterial = new Dictionary<string, Mesh>(StringComparer.OrdinalIgnoreCase);
-
-        foreach (var sector in level.Sectors)
-        {
-            foreach (var surface in sector.Surfaces)
-            {
-                if (surface.Corners.Count < 3) continue;
-
-                // Surfaces without a material are adjoin portals / sky: in-game they
-                // are invisible openings, so skip them rather than drawing solid
-                // walls that occlude the rooms beyond.
-                if (string.IsNullOrEmpty(surface.Material)) continue;
-
-                surface.RecalcNormal();
-                var normal = surface.Normal;
-
-                if (!byMaterial.TryGetValue(surface.Material, out var mesh))
-                    byMaterial[surface.Material] = mesh = new Mesh();
-
-                var c0 = surface.Corners[0];
-                for (int i = 1; i + 1 < surface.Corners.Count; i++)
-                    mesh.AddTriangle(
-                        Vertex(c0, normal),
-                        Vertex(surface.Corners[i], normal),
-                        Vertex(surface.Corners[i + 1], normal));
-            }
-        }
-
-        var scene = new RenderScene();
-        foreach (var (material, mesh) in byMaterial)
-        {
-            if (mesh.IsEmpty) continue;
-            uint baseVertex = (uint)scene.Mesh.Vertices.Count;
-            int indexOffset = scene.Mesh.Indices.Count;
-
-            scene.Mesh.Vertices.AddRange(mesh.Vertices);
-            foreach (var idx in mesh.Indices)
-                scene.Mesh.Indices.Add(idx + baseVertex);
-
-            scene.Submeshes.Add(new Submesh
-            {
-                Material = material,
-                IndexOffset = indexOffset,
-                IndexCount = mesh.Indices.Count,
-            });
-        }
-        return scene;
+        var assembler = new SceneAssembler();
+        assembler.AddLevel(level);
+        return assembler.Build();
     }
 
     /// <summary>Builds a mesh of small cubes at each thing's position (for visible markers).</summary>
-    public static Mesh BuildThingMarkers(Level level, double size, ColorF color)
+    public static Mesh BuildThingMarkers(Level level, double size, ColorF color) =>
+        BuildThingMarkers(level.Things, size, color);
+
+    /// <summary>Builds marker cubes for a specific set of things.</summary>
+    public static Mesh BuildThingMarkers(IEnumerable<Thing> things, double size, ColorF color)
     {
         var mesh = new Mesh();
-        foreach (var thing in level.Things)
+        foreach (var thing in things)
             AppendCube(mesh, thing.Position, size, color);
         return mesh;
     }
@@ -116,15 +64,6 @@ public static class SceneBuilder
                 new MeshVertex(p[f[3]], n, color));
         }
     }
-
-    private static MeshVertex Vertex(Surface.Corner c, Vec3 normal)
-    {
-        var lit = new ColorF(Light(c.Intensity.R), Light(c.Intensity.G), Light(c.Intensity.B));
-        return new MeshVertex(c.Vertex.Position, normal, lit, c.Uv.U, c.Uv.V);
-    }
-
-    private static float Light(float intensity) =>
-        System.Math.Clamp(LightBias + intensity * LightScale, 0f, 1.4f);
 
     public static Mesh FromLevel(Level level)
     {

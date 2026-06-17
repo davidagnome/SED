@@ -7,6 +7,7 @@ using Avalonia.Threading;
 using Sed.Core.Editing;
 using Sed.Core.Math;
 using Sed.Core.Model;
+using Sed.Formats.ThreeDo;
 using Sed.Rendering;
 using Sed.Rendering.Vulkan;
 
@@ -73,7 +74,9 @@ public sealed class VulkanView : Control
         SetLevel(level);
     }
 
-    public void SetLevel(Level level, TextureLookup? textures = null)
+    private List<Thing> _markerThings = new();
+
+    public void SetLevel(Level level, TextureLookup? textures = null, Func<string, ThreeDoModel?>? models = null)
     {
         if (_renderer is null) return;
         _level = level;
@@ -83,9 +86,18 @@ public sealed class VulkanView : Control
         History.Clear();
 
         if (textures is not null)
-            _renderer.SetScene(SceneBuilder.BuildScene(level), textures);
+        {
+            var assembler = new SceneAssembler();
+            assembler.AddLevel(level);
+            // Things with a 3DO model render as geometry; the rest get markers.
+            _markerThings = models is not null ? assembler.AddThings(level, models) : level.Things.ToList();
+            _renderer.SetScene(assembler.Build(), textures);
+        }
         else
+        {
             _renderer.SetMesh(SceneBuilder.FromLevel(level));
+            _markerThings = level.Things.ToList();
+        }
 
         FrameLevel(level);
         _markerSize = System.Math.Max(0.02, _moveSpeed * 0.5);
@@ -98,9 +110,9 @@ public sealed class VulkanView : Control
 
     private void RefreshMarkers()
     {
-        if (_renderer is null || _level is null) return;
-        _renderer.SetMarkers(_level.Things.Count > 0
-            ? SceneBuilder.BuildThingMarkers(_level, _markerSize, MarkerColor)
+        if (_renderer is null) return;
+        _renderer.SetMarkers(_markerThings.Count > 0
+            ? SceneBuilder.BuildThingMarkers(_markerThings, _markerSize, MarkerColor)
             : null);
     }
 

@@ -33,6 +33,7 @@ public class MainWindow : Window
     private GobArchive? _adhocResourceGob;
     private GobArchive? _levelArchive;
     private GobArchive[] _materialArchives = Array.Empty<GobArchive>();
+    private Sed.Formats.ThreeDo.ModelLibrary? _modelLibrary;
     private List<GobEntry> _levels = new();
 
     public MainWindow()
@@ -234,7 +235,14 @@ public class MainWindow : Window
         try { textures = MakeTextureLookup(level); }
         catch { /* untextured fallback */ }
 
-        _view.SetLevel(level, textures);
+        Func<string, Sed.Formats.ThreeDo.ThreeDoModel?>? models = null;
+        if (_materialArchives.Length > 0)
+        {
+            _modelLibrary ??= new Sed.Formats.ThreeDo.ModelLibrary(_materialArchives);
+            models = _modelLibrary.Get;
+        }
+
+        _view.SetLevel(level, textures, models);
         int surfaces = level.Sectors.Sum(s => s.Surfaces.Count);
         _status.Text = $"{name} — {level.Sectors.Count} sectors, {surfaces} surfaces, " +
                        $"{level.Things.Count} things ({(textures is null ? "untextured" : "textured")})";
@@ -259,6 +267,7 @@ public class MainWindow : Window
         _adhocResourceGob?.Dispose(); _adhocResourceGob = null;
         _levelArchive = null;
         _materialArchives = Array.Empty<GobArchive>();
+        _modelLibrary = null;
         _levels = new();
         _levelList.ItemsSource = null;
     }

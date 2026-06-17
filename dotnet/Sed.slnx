@@ -18,6 +18,7 @@
     <Project Path="tools/Sed.LevelRender/Sed.LevelRender.csproj" />
     <Project Path="tools/Sed.MatTool/Sed.MatTool.csproj" />
     <Project Path="tools/Sed.SceneProbe/Sed.SceneProbe.csproj" />
+    <Project Path="tools/Sed.ThreeDoProbe/Sed.ThreeDoProbe.csproj" />
     <Project Path="tools/Sed.TriangleProbe/Sed.TriangleProbe.csproj" />
     <Project Path="tools/Sed.VulkanSmoke/Sed.VulkanSmoke.csproj" />
   </Folder>

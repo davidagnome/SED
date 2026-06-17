@@ -2,6 +2,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Sed.Core\Sed.Core.csproj" />
+    <ProjectReference Include="..\Sed.Formats\Sed.Formats.csproj" />
   </ItemGroup>
 
   <PropertyGroup>

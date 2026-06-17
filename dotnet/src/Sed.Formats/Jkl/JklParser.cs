@@ -42,6 +42,7 @@ public static class JklParser
                 case "MATERIALS": LoadMaterials(r, geo); break;
                 case "GEORESOURCE": LoadGeometry(r, level, geo); break;
                 case "SECTORS": LoadSectors(r, level, geo); break;
+                case "TEMPLATES": LoadTemplates(r, level); break;
                 case "THINGS": LoadThings(r, level); break;
                 default: r.SkipToNextSection(); break;
             }
@@ -292,6 +293,28 @@ public static class JklParser
         }
     }
 
+    // ---- TEMPLATES ----
+
+    private static void LoadTemplates(JklReader r, Level level)
+    {
+        if (!r.Next()) return; // "World templates n"
+        int n = LastInt(r.Current);
+        for (int i = 0; i < n; i++)
+        {
+            if (!r.Next(upper: false) || r.EndOfSection) break;
+            var t = JklReader.Tokens(r.Current);
+            if (t.Length < 2 || t[0] is "#" or "//") continue;
+
+            var tpl = new Template { Name = t[0], Parent = t[1] };
+            for (int p = 2; p < t.Length; p++)
+            {
+                int eq = t[p].IndexOf('=');
+                if (eq > 0) tpl.Values[t[p][..eq]] = t[p][(eq + 1)..];
+            }
+            level.Templates[tpl.Name] = tpl;
+        }
+    }
+
     // ---- THINGS ----
 
     private static void LoadThings(JklReader r, Level level)
@@ -306,6 +329,7 @@ public static class JklParser
 
             var thing = level.NewThing();
             // t[0]=index, t[1]=template, t[2]=name, t[3..5]=xyz, t[6..8]=pyr, t[9]=sector
+            thing.Template = t[1];
             thing.Name = t[2];
             thing.Position = new Vec3(
                 JklReader.ParseFloat(t[3]), JklReader.ParseFloat(t[4]), JklReader.ParseFloat(t[5]));

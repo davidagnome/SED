@@ -21,3 +21,11 @@ public sealed class Cog
     public string Name = string.Empty;
     public Dictionary<string, string> Values { get; } = new(StringComparer.OrdinalIgnoreCase);
 }
+
+/// <summary>A thing template: a named bundle of parameters with optional parent inheritance.</summary>
+public sealed class Template
+{
+    public string Name = string.Empty;
+    public string Parent = string.Empty;
+    public Dictionary<string, string> Values { get; } = new(StringComparer.OrdinalIgnoreCase);
+}

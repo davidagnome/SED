@@ -20,6 +20,32 @@ public sealed class Level
     /// <summary>CMP colormap file names from GEORESOURCE; index 0 is the master palette.</summary>
     public List<string> ColorMaps { get; } = new();
 
+    /// <summary>Thing templates by name (from the TEMPLATES section).</summary>
+    public Dictionary<string, Template> Templates { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Resolves a thing's <c>model3d</c> (the .3do filename), checking the thing's
+    /// own params then walking its template's parent chain. Empty if none.
+    /// </summary>
+    public string GetThingModel(Thing thing)
+    {
+        if (thing.Values.TryGetValue("model3d", out var direct) && direct.Length > 0)
+            return direct;
+        return GetTemplateValue(thing.Template, "model3d");
+    }
+
+    /// <summary>Looks up a template parameter, following the parent chain (depth-limited).</summary>
+    public string GetTemplateValue(string templateName, string key)
+    {
+        for (int depth = 0; depth < 32 && !string.IsNullOrEmpty(templateName); depth++)
+        {
+            if (!Templates.TryGetValue(templateName, out var tpl)) break;
+            if (tpl.Values.TryGetValue(key, out var v) && v.Length > 0) return v;
+            templateName = tpl.Parent;
+        }
+        return string.Empty;
+    }
+
     public string MasterCmp { get; set; } = string.Empty;
     public double PixelsPerUnit { get; set; }
 

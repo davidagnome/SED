@@ -74,4 +74,48 @@ public struct Mat4
         m.M[14] = (float)t.Z;
         return m;
     }
+
+    public static Mat4 RotateX(double r)
+    {
+        float c = (float)System.Math.Cos(r), s = (float)System.Math.Sin(r);
+        var m = Identity;
+        m.M[5] = c; m.M[6] = s; m.M[9] = -s; m.M[10] = c;
+        return m;
+    }
+
+    public static Mat4 RotateY(double r)
+    {
+        float c = (float)System.Math.Cos(r), s = (float)System.Math.Sin(r);
+        var m = Identity;
+        m.M[0] = c; m.M[2] = -s; m.M[8] = s; m.M[10] = c;
+        return m;
+    }
+
+    public static Mat4 RotateZ(double r)
+    {
+        float c = (float)System.Math.Cos(r), s = (float)System.Math.Sin(r);
+        var m = Identity;
+        m.M[0] = c; m.M[1] = s; m.M[4] = -s; m.M[5] = c;
+        return m;
+    }
+
+    /// <summary>
+    /// Sith-engine object orientation from (pitch, yaw, roll) in degrees:
+    /// yaw about +Z (up), pitch about +X, roll about +Y, applied yaw·pitch·roll.
+    /// </summary>
+    public static Mat4 FromPyr(double pitchDeg, double yawDeg, double rollDeg)
+    {
+        const double d2r = System.Math.PI / 180.0;
+        return RotateZ(yawDeg * d2r) * RotateX(pitchDeg * d2r) * RotateY(rollDeg * d2r);
+    }
+
+    /// <summary>Transforms a position (w=1) by this matrix.</summary>
+    public Vec3 TransformPoint(Vec3 p)
+    {
+        double x = p.X, y = p.Y, z = p.Z;
+        return new Vec3(
+            M[0] * x + M[4] * y + M[8] * z + M[12],
+            M[1] * x + M[5] * y + M[9] * z + M[13],
+            M[2] * x + M[6] * y + M[10] * z + M[14]);
+    }
 }

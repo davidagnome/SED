@@ -8,6 +8,8 @@ public sealed class Thing
     public int Id;
     public int Num;
     public string Name = string.Empty;
+    /// <summary>Template this thing instantiates (resolves its model3d, type, etc.).</summary>
+    public string Template = string.Empty;
 
     public Vec3 Position;
     /// <summary>Pitch, yaw, roll in degrees (pch, yaw, rol).</summary>
