@@ -25,6 +25,12 @@ public sealed class Camera
     /// <summary>World up. The Sith engine is Z-up (sector floors face +Z).</summary>
     public static Vec3 Up => new(0, 0, 1);
 
+    /// <summary>Camera-right unit vector (screen +X).</summary>
+    public Vec3 Right => Forward.Cross(Up).Normalized();
+
+    /// <summary>Camera-up unit vector (screen +Y), tilts with pitch.</summary>
+    public Vec3 CameraUp => Right.Cross(Forward).Normalized();
+
     /// <summary>Creates a camera positioned at <paramref name="eye"/> aimed at <paramref name="target"/>.</summary>
     public static Camera LookingAt(Vec3 eye, Vec3 target, double fovDegrees = 60.0)
     {

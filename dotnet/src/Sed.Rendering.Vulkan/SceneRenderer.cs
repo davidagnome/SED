@@ -28,6 +28,14 @@ public sealed unsafe class SceneRenderer : IDisposable
     private Sampler _sampler;
     private PipelineLayout _layout;
     private Pipeline _pipeline;
+    private Pipeline _selectionPipeline;   // depth-test off: highlight always visible
+
+    // Selection overlay geometry
+    private VkBuffer _selVertexBuffer;
+    private DeviceMemory _selVertexMemory;
+    private VkBuffer _selIndexBuffer;
+    private DeviceMemory _selIndexMemory;
+    private uint _selIndexCount;
 
     // Persistent 1x1 white fallback texture.
     private GpuTexture _white;
@@ -124,6 +132,23 @@ public sealed unsafe class SceneRenderer : IDisposable
         }
     }
 
+    /// <summary>Sets (or clears) the highlighted overlay geometry; its vertex colors are drawn as-is.</summary>
+    public void SetSelection(Mesh? mesh)
+    {
+        DestroySelection();
+        if (mesh is null || mesh.IsEmpty) { _selIndexCount = 0; return; }
+
+        var verts = mesh.Vertices.ToArray();
+        var indices = mesh.Indices.ToArray();
+        _selIndexCount = (uint)indices.Length;
+        (_selVertexBuffer, _selVertexMemory) = CreateHostBuffer(
+            (ulong)(verts.Length * (int)MeshVertex.Stride), BufferUsageFlags.VertexBufferBit);
+        Upload(_selVertexMemory, MemoryMarshal.AsBytes<MeshVertex>(verts));
+        (_selIndexBuffer, _selIndexMemory) = CreateHostBuffer(
+            (ulong)(indices.Length * sizeof(uint)), BufferUsageFlags.IndexBufferBit);
+        Upload(_selIndexMemory, MemoryMarshal.AsBytes<uint>(indices));
+    }
+
     /// <summary>Renders one frame and returns tightly-packed RGBA8 pixels.</summary>
     public byte[] Render(Mat4 viewProjection, uint width, uint height,
         float clearR = 0.05f, float clearG = 0.05f, float clearB = 0.08f)
@@ -151,12 +176,12 @@ public sealed unsafe class SceneRenderer : IDisposable
         _vk.CmdSetViewport(cmd, 0, 1, in viewport);
         _vk.CmdSetScissor(cmd, 0, 1, in scissor);
 
+        fixed (float* mvp = viewProjection.M)
+            _vk.CmdPushConstants(cmd, _layout, ShaderStageFlags.VertexBit, 0, 64, mvp);
+
         if (_draws.Count > 0)
         {
             _vk.CmdBindPipeline(cmd, PipelineBindPoint.Graphics, _pipeline);
-            fixed (float* mvp = viewProjection.M)
-                _vk.CmdPushConstants(cmd, _layout, ShaderStageFlags.VertexBit, 0, 64, mvp);
-
             var vb = _vertexBuffer;
             ulong offset = 0;
             _vk.CmdBindVertexBuffers(cmd, 0, 1, in vb, in offset);
@@ -168,6 +193,19 @@ public sealed unsafe class SceneRenderer : IDisposable
                 _vk.CmdBindDescriptorSets(cmd, PipelineBindPoint.Graphics, _layout, 0, 1, in set, 0, null);
                 _vk.CmdDrawIndexed(cmd, draw.IndexCount, 1, draw.IndexOffset, 0, 0);
             }
+        }
+
+        // Selection overlay (depth-test off, white texture, bright per-vertex color).
+        if (_selIndexCount > 0 && _white.Set.Handle != 0)
+        {
+            _vk.CmdBindPipeline(cmd, PipelineBindPoint.Graphics, _selectionPipeline);
+            var set = _white.Set;
+            _vk.CmdBindDescriptorSets(cmd, PipelineBindPoint.Graphics, _layout, 0, 1, in set, 0, null);
+            var vb = _selVertexBuffer;
+            ulong offset = 0;
+            _vk.CmdBindVertexBuffers(cmd, 0, 1, in vb, in offset);
+            _vk.CmdBindIndexBuffer(cmd, _selIndexBuffer, 0, IndexType.Uint32);
+            _vk.CmdDrawIndexed(cmd, _selIndexCount, 1, 0, 0, 0);
         }
 
         _vk.CmdEndRenderPass(cmd);
@@ -363,10 +401,15 @@ public sealed unsafe class SceneRenderer : IDisposable
                 SType = StructureType.PipelineMultisampleStateCreateInfo,
                 RasterizationSamples = SampleCountFlags.Count1Bit,
             };
-            var depthStencil = new PipelineDepthStencilStateCreateInfo
+            var depthOn = new PipelineDepthStencilStateCreateInfo
             {
                 SType = StructureType.PipelineDepthStencilStateCreateInfo,
                 DepthTestEnable = true, DepthWriteEnable = true, DepthCompareOp = CompareOp.Less,
+            };
+            var depthOff = new PipelineDepthStencilStateCreateInfo
+            {
+                SType = StructureType.PipelineDepthStencilStateCreateInfo,
+                DepthTestEnable = false, DepthWriteEnable = false, DepthCompareOp = CompareOp.Always,
             };
             var blendAttachment = new PipelineColorBlendAttachmentState
             {
@@ -403,12 +446,16 @@ public sealed unsafe class SceneRenderer : IDisposable
                 StageCount = 2, PStages = stages,
                 PVertexInputState = &vertexInput, PInputAssemblyState = &inputAssembly,
                 PViewportState = &viewportState, PRasterizationState = &raster,
-                PMultisampleState = &multisample, PDepthStencilState = &depthStencil,
+                PMultisampleState = &multisample, PDepthStencilState = &depthOn,
                 PColorBlendState = &blend, PDynamicState = &dynamic,
                 Layout = _layout, RenderPass = _renderPass, Subpass = 0,
             };
             if (_vk.CreateGraphicsPipelines(_dev.Device, default, 1, in info, null, out _pipeline) != Result.Success)
                 throw new VulkanException("vkCreateGraphicsPipelines failed");
+
+            info.PDepthStencilState = &depthOff;
+            if (_vk.CreateGraphicsPipelines(_dev.Device, default, 1, in info, null, out _selectionPipeline) != Result.Success)
+                throw new VulkanException("vkCreateGraphicsPipelines (selection) failed");
         }
         finally
         {
@@ -647,6 +694,16 @@ public sealed unsafe class SceneRenderer : IDisposable
         if (_descPool.Handle != 0) { _vk.DestroyDescriptorPool(_dev.Device, _descPool, null); _descPool = default; }
     }
 
+    private void DestroySelection()
+    {
+        var d = _dev.Device;
+        if (_selVertexBuffer.Handle != 0) { _vk.DestroyBuffer(d, _selVertexBuffer, null); _selVertexBuffer = default; }
+        if (_selVertexMemory.Handle != 0) { _vk.FreeMemory(d, _selVertexMemory, null); _selVertexMemory = default; }
+        if (_selIndexBuffer.Handle != 0) { _vk.DestroyBuffer(d, _selIndexBuffer, null); _selIndexBuffer = default; }
+        if (_selIndexMemory.Handle != 0) { _vk.FreeMemory(d, _selIndexMemory, null); _selIndexMemory = default; }
+        _selIndexCount = 0;
+    }
+
     private void DestroyScene()
     {
         var d = _dev.Device;
@@ -677,9 +734,11 @@ public sealed unsafe class SceneRenderer : IDisposable
     public void Dispose()
     {
         DestroyScene();
+        DestroySelection();
         DestroyTargets();
         DestroyTexture(_white);
         var d = _dev.Device;
+        if (_selectionPipeline.Handle != 0) _vk.DestroyPipeline(d, _selectionPipeline, null);
         if (_pipeline.Handle != 0) _vk.DestroyPipeline(d, _pipeline, null);
         if (_layout.Handle != 0) _vk.DestroyPipelineLayout(d, _layout, null);
         if (_setLayout.Handle != 0) _vk.DestroyDescriptorSetLayout(d, _setLayout, null);

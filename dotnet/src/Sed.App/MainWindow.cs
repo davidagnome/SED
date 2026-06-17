@@ -3,6 +3,8 @@ using Avalonia.Controls;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Platform.Storage;
+using Sed.Core.Model;
+using Sed.Formats.Game;
 using Sed.Formats.Gob;
 using Sed.Formats.Jkl;
 using Sed.Formats.Material;
@@ -11,20 +13,26 @@ using Sed.Rendering;
 namespace Sed.App;
 
 /// <summary>
-/// The editor shell: menu, a level/sector side panel, the Vulkan 3D viewport,
-/// and a status bar. Opens loose .jkl files or .gob archives (Jedi Knight's
-/// container), listing the archive's levels in the side panel.
+/// The editor shell. Levels and textures are resolved from a configured game
+/// installation directory (Game menu, persisted in <see cref="AppSettings"/>),
+/// mirroring the original editor's per-game path options; loose .jkl/.gob files
+/// can also be opened directly via File ▸ Open.
 /// </summary>
 public class MainWindow : Window
 {
+    private readonly AppSettings _settings = AppSettings.Load();
     private readonly TextBlock _status;
     private readonly VulkanView _view;
     private readonly ListBox _levelList;
     private readonly TextBlock _sidePanelHeader;
 
-    private GobArchive? _gob;
-    private GobArchive? _resourceGob;
-    private List<GobEntry> _gobLevels = new();
+    // Active session (whichever source is open).
+    private GameInstall? _install;
+    private GobArchive? _adhocGob;
+    private GobArchive? _adhocResourceGob;
+    private GobArchive? _levelArchive;
+    private GobArchive[] _materialArchives = Array.Empty<GobArchive>();
+    private List<GobEntry> _levels = new();
 
     public MainWindow()
     {
@@ -35,31 +43,23 @@ public class MainWindow : Window
         _status = new TextBlock
         {
             Margin = new Thickness(8, 4),
-            Text = "Vulkan viewport (MoltenVK) — drag to orbit, wheel to zoom. File ▸ Open a .jkl or .gob",
+            Text = "WASD/QE to fly, drag to look, click to select. Game ▸ Set folder, or File ▸ Open.",
             VerticalAlignment = VerticalAlignment.Center,
         };
-        _view = new VulkanView(Sed.Rendering.SampleScene.CreateCube());
+        _view = new VulkanView(SampleScene.CreateCube()) { Picked = OnPicked };
 
-        _sidePanelHeader = new TextBlock
-        {
-            Margin = new Thickness(10, 8),
-            Text = "No archive open",
-            Foreground = Brushes.Gray,
-        };
+        _sidePanelHeader = new TextBlock { Margin = new Thickness(10, 8), Text = "No game configured", Foreground = Brushes.Gray };
         _levelList = new ListBox { Background = Brushes.Transparent };
         _levelList.SelectionChanged += (_, _) => OnLevelSelected();
 
         var root = new DockPanel();
-
         var menu = BuildMenu();
         DockPanel.SetDock(menu, Dock.Top);
         root.Children.Add(menu);
 
         var statusBar = new Border
         {
-            Background = new SolidColorBrush(Color.FromRgb(0x25, 0x25, 0x2b)),
-            Child = _status,
-            Height = 28,
+            Background = new SolidColorBrush(Color.FromRgb(0x25, 0x25, 0x2b)), Child = _status, Height = 28,
         };
         DockPanel.SetDock(statusBar, Dock.Bottom);
         root.Children.Add(statusBar);
@@ -68,20 +68,87 @@ public class MainWindow : Window
         DockPanel.SetDock(_sidePanelHeader, Dock.Top);
         sideContent.Children.Add(_sidePanelHeader);
         sideContent.Children.Add(_levelList);
-
-        var sidePanel = new Border
-        {
-            Background = new SolidColorBrush(Color.FromRgb(0x1e, 0x1e, 0x22)),
-            Child = sideContent,
-        };
+        var sidePanel = new Border { Background = new SolidColorBrush(Color.FromRgb(0x1e, 0x1e, 0x22)), Child = sideContent };
         DockPanel.SetDock(sidePanel, Dock.Left);
         root.Children.Add(sidePanel);
 
         root.Children.Add(_view);
         Content = root;
+
+        TryAutoOpenConfiguredGame();
     }
 
-    private async void OpenLevel()
+    // ---- game install flow ----
+
+    private static readonly (string label, ProjectType game)[] Games =
+    {
+        ("Dark Forces II / Jedi Knight", ProjectType.JediKnight),
+        ("Mysteries of the Sith", ProjectType.MysteriesOfTheSith),
+        ("Indiana Jones and the Infernal Machine", ProjectType.InfernalMachine),
+    };
+
+    private void TryAutoOpenConfiguredGame()
+    {
+        foreach (var (_, game) in Games)
+        {
+            var dir = _settings.DirFor(game);
+            if (!string.IsNullOrEmpty(dir) && GameInstall.IsValid(game, dir))
+            {
+                OpenGame(game);
+                return;
+            }
+        }
+    }
+
+    private async void SetGameFolder(ProjectType game)
+    {
+        var folders = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions
+        {
+            Title = $"Select {Games.First(g => g.game == game).label} installation folder",
+            AllowMultiple = false,
+        });
+        var folder = folders.FirstOrDefault();
+        if (folder is null) return;
+
+        var dir = folder.Path.LocalPath;
+        if (!GameInstall.IsValid(game, dir))
+        {
+            var (level, resources) = GameInstall.ExpectedFiles(game);
+            _status.Text = $"That folder doesn't look like a {game} install " +
+                           $"(expected e.g. {string.Join(" / ", level.Concat(resources).Take(2))} under it).";
+            return;
+        }
+
+        _settings.SetDir(game, dir);
+        _settings.Save();
+        OpenGame(game);
+    }
+
+    private void OpenGame(ProjectType game)
+    {
+        var dir = _settings.DirFor(game);
+        if (string.IsNullOrEmpty(dir)) { _status.Text = $"No folder configured for {game}."; return; }
+
+        try
+        {
+            var install = GameInstall.TryOpen(game, dir);
+            if (install is null) { _status.Text = $"No game archives found under {dir}."; return; }
+
+            ClearSession();
+            _install = install;
+            _levelArchive = install.LevelArchive;
+            _materialArchives = install.ResourceArchives.ToArray();
+            PopulateLevels($"{game} — {Path.GetFileName(dir.TrimEnd('/', '\\'))}");
+        }
+        catch (Exception ex)
+        {
+            _status.Text = $"Failed to open {game}: {ex.Message}";
+        }
+    }
+
+    // ---- loose file flow ----
+
+    private async void OpenFile()
     {
         var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
         {
@@ -94,19 +161,25 @@ public class MainWindow : Window
                 FilePickerFileTypes.All,
             },
         });
-
         var file = files.FirstOrDefault();
         if (file is null) return;
         var path = file.Path.LocalPath;
 
         try
         {
-            DiscoverResourceGob(path);
+            ClearSession();
+            DiscoverAdhocResources(path);
             if (path.EndsWith(".gob", StringComparison.OrdinalIgnoreCase) ||
                 path.EndsWith(".goo", StringComparison.OrdinalIgnoreCase))
-                OpenArchive(path);
+            {
+                _adhocGob = GobArchive.Open(path);
+                _levelArchive = _adhocGob;
+                PopulateLevels(Path.GetFileName(path));
+            }
             else
+            {
                 LoadLevel(JklParser.ParseFile(path), file.Name);
+            }
         }
         catch (Exception ex)
         {
@@ -114,37 +187,60 @@ public class MainWindow : Window
         }
     }
 
-    /// <summary>Locates a resource GOB (Res2/Res1hi) near the opened file for textures.</summary>
-    private void DiscoverResourceGob(string openedPath)
+    private void DiscoverAdhocResources(string openedPath)
     {
-        if (_resourceGob is not null) return;
-
         var dir = Path.GetDirectoryName(openedPath);
-        var candidates = new List<string>();
-        foreach (var name in new[] { "Res2.gob", "res2.gob", "Res1hi.gob" })
+        if (dir is null) return;
+        foreach (var c in new[]
         {
-            if (dir is not null)
-            {
-                candidates.Add(Path.Combine(dir, name));
-                candidates.Add(Path.Combine(dir, "..", "Resource", name));
-                var parent = Directory.GetParent(dir)?.FullName;
-                if (parent is not null) candidates.Add(Path.Combine(parent, "Resource", name));
-            }
-        }
-
-        foreach (var c in candidates)
+            Path.Combine(dir, "Res2.gob"),
+            Path.Combine(dir, "..", "Resource", "Res2.gob"),
+            Path.Combine(Directory.GetParent(dir)?.FullName ?? dir, "Resource", "Res2.gob"),
+        })
         {
             if (!File.Exists(c)) continue;
-            try { _resourceGob = GobArchive.Open(c); return; }
+            try { _adhocResourceGob = GobArchive.Open(c); _materialArchives = new[] { _adhocResourceGob }; return; }
             catch { /* try next */ }
         }
     }
 
-    private TextureLookup? MakeTextureLookup(Sed.Core.Model.Level level)
+    // ---- shared session ----
+
+    private void PopulateLevels(string header)
     {
-        if (_resourceGob is null) return null;
-        var palette = MaterialLibrary.LoadPalette(level.ColorMaps, _resourceGob);
-        var library = new MaterialLibrary(palette, _resourceGob);
+        _levels = _levelArchive?.FindByExtension(".jkl").OrderBy(e => e.NormalizedName).ToList() ?? new();
+        _sidePanelHeader.Text = $"{header} — {_levels.Count} levels";
+        _levelList.ItemsSource = _levels.Select(e => Path.GetFileName(e.NormalizedName)).ToList();
+        if (_levels.Count > 0) _levelList.SelectedIndex = 0;
+        else _status.Text = $"{header}: no levels found";
+    }
+
+    private void OnLevelSelected()
+    {
+        int i = _levelList.SelectedIndex;
+        if (_levelArchive is null || (uint)i >= (uint)_levels.Count) return;
+        var entry = _levels[i];
+        try { LoadLevel(JklParser.Parse(_levelArchive.ReadText(entry)), Path.GetFileName(entry.NormalizedName)); }
+        catch (Exception ex) { _status.Text = $"Failed to parse {entry.Name}: {ex.Message}"; }
+    }
+
+    private void LoadLevel(Level level, string name)
+    {
+        TextureLookup? textures = null;
+        try { textures = MakeTextureLookup(level); }
+        catch { /* untextured fallback */ }
+
+        _view.SetLevel(level, textures);
+        int surfaces = level.Sectors.Sum(s => s.Surfaces.Count);
+        _status.Text = $"{name} — {level.Sectors.Count} sectors, {surfaces} surfaces, " +
+                       $"{level.Things.Count} things ({(textures is null ? "untextured" : "textured")})";
+    }
+
+    private TextureLookup? MakeTextureLookup(Level level)
+    {
+        if (_materialArchives.Length == 0) return null;
+        var palette = MaterialLibrary.LoadPalette(level.ColorMaps, _materialArchives);
+        var library = new MaterialLibrary(palette, _materialArchives);
         return material =>
         {
             var t = library.Get(material);
@@ -152,73 +248,53 @@ public class MainWindow : Window
         };
     }
 
-    private void OpenArchive(string path)
+    private void OnPicked(PickResult? hit)
     {
-        _gob?.Dispose();
-        _gob = GobArchive.Open(path);
-        _gobLevels = _gob.FindByExtension(".jkl").OrderBy(e => e.NormalizedName).ToList();
-
-        _sidePanelHeader.Text = $"{Path.GetFileName(path)} — {_gobLevels.Count} levels";
-        _levelList.ItemsSource = _gobLevels.Select(e => Path.GetFileName(e.NormalizedName)).ToList();
-
-        if (_gobLevels.Count > 0)
-            _levelList.SelectedIndex = 0; // triggers OnLevelSelected
-        else
-            _status.Text = $"{Path.GetFileName(path)} contains no JKL levels";
+        if (hit is null) { _status.Text = "No surface under cursor"; return; }
+        var mat = string.IsNullOrEmpty(hit.Surface.Material) ? "(no material)" : hit.Surface.Material;
+        _status.Text = $"Picked: sector {hit.Sector.Num}, surface {hit.Surface.Num} — {mat} (dist {hit.Distance:0.0})";
     }
 
-    private void OnLevelSelected()
+    private void ClearSession()
     {
-        int i = _levelList.SelectedIndex;
-        if (_gob is null || (uint)i >= (uint)_gobLevels.Count) return;
-
-        var entry = _gobLevels[i];
-        try
-        {
-            var level = JklParser.Parse(_gob.ReadText(entry));
-            LoadLevel(level, Path.GetFileName(entry.NormalizedName));
-        }
-        catch (Exception ex)
-        {
-            _status.Text = $"Failed to parse {entry.Name}: {ex.Message}";
-        }
-    }
-
-    private void LoadLevel(Sed.Core.Model.Level level, string name)
-    {
-        TextureLookup? textures = null;
-        try { textures = MakeTextureLookup(level); }
-        catch { /* fall back to untextured */ }
-
-        _view.SetLevel(level, textures);
-        int surfaces = level.Sectors.Sum(s => s.Surfaces.Count);
-        var tex = textures is null ? "untextured" : "textured";
-        _status.Text = $"{name} — {level.Sectors.Count} sectors, {surfaces} surfaces, " +
-                       $"{level.Things.Count} things ({level.Kind}, {tex})";
+        _install?.Dispose(); _install = null;
+        _adhocGob?.Dispose(); _adhocGob = null;
+        _adhocResourceGob?.Dispose(); _adhocResourceGob = null;
+        _levelArchive = null;
+        _materialArchives = Array.Empty<GobArchive>();
+        _levels = new();
+        _levelList.ItemsSource = null;
     }
 
     private Menu BuildMenu()
     {
         var open = new MenuItem { Header = "_Open…" };
-        open.Click += (_, _) => OpenLevel();
-
+        open.Click += (_, _) => OpenFile();
+        var exit = new MenuItem { Header = "E_xit" };
+        exit.Click += (_, _) => (Application.Current?.ApplicationLifetime
+            as Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime)?.Shutdown();
         var file = new MenuItem { Header = "_File" };
         file.Items.Add(open);
         file.Items.Add(new MenuItem { Header = "_Save", IsEnabled = false });
         file.Items.Add(new Separator());
-        var exit = new MenuItem { Header = "E_xit" };
-        exit.Click += (_, _) => (Application.Current?.ApplicationLifetime
-            as Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime)?.Shutdown();
         file.Items.Add(exit);
+
+        var game = new MenuItem { Header = "_Game" };
+        foreach (var (label, kind) in Games)
+        {
+            var item = new MenuItem { Header = $"Set _{label} Folder…" };
+            item.Click += (_, _) => SetGameFolder(kind);
+            game.Items.Add(item);
+        }
 
         var view = new MenuItem { Header = "_View" };
         view.Items.Add(new MenuItem { Header = "3D Preview" });
-
         var help = new MenuItem { Header = "_Help" };
         help.Items.Add(new MenuItem { Header = "About SED" });
 
         var menu = new Menu();
         menu.Items.Add(file);
+        menu.Items.Add(game);
         menu.Items.Add(view);
         menu.Items.Add(help);
         return menu;
@@ -226,8 +302,7 @@ public class MainWindow : Window
 
     protected override void OnClosed(EventArgs e)
     {
-        _gob?.Dispose();
-        _resourceGob?.Dispose();
+        ClearSession();
         base.OnClosed(e);
     }
 }

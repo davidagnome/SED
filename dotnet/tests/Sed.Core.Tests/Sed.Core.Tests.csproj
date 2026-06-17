@@ -21,6 +21,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\Sed.Core\Sed.Core.csproj" />
     <ProjectReference Include="..\..\src\Sed.Formats\Sed.Formats.csproj" />
+    <ProjectReference Include="..\..\src\Sed.Rendering\Sed.Rendering.csproj" />
   </ItemGroup>
 
 </Project>

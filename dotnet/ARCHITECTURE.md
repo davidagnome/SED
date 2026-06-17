@@ -18,11 +18,11 @@ math. See the repo-root analysis for the full option comparison (Lazarus/LCL vs
 | Project | Role | Status |
 |---|---|---|
 | `Sed.Core` | Math (double-precision `Vec2/3`, `ColorF`, `Box`) + domain model (`Level`, `Sector`, `Surface`, `Vertex`, `Thing`, `Light`, `Cog`, `LevelHeader`) | ✅ builds, unit-tested |
-| `Sed.Formats` | **JKL** (`Jkl/`), **GOB archive** (`Gob/`), **MAT texture + CMP palette** (`Material/`) | ✅ validated on retail JK1/Res2 data |
+| `Sed.Formats` | **JKL** (`Jkl/`), **GOB** (`Gob/`), **MAT/CMP** (`Material/`), **`Game/GameInstall`** (per-game base dir → resource GOBs) | ✅ validated on retail data |
 | `Sed.Core` | + `Mat4` (column-major, Vulkan-clip perspective/lookat) | ✅ 9 tests |
-| `Sed.Rendering` | `Camera`, `Mesh` (pos/normal/color/uv), `SceneBuilder` (→ material-batched `RenderScene`), `TextureLookup`, `PngWriter` | ✅ |
-| `Sed.Rendering.Vulkan` | Silk.NET backend; MoltenVK locator, logical device, **textured `SceneRenderer`** (vertex/index + depth + MVP push constant + **per-material descriptor sets / sampled textures** + dynamic viewport) | ✅ verified on M4 Pro |
-| `Sed.App` | Avalonia shell + live `VulkanView`; **File ▸ Open loads .jkl/.gob and renders textured levels** (auto-discovers Res2.gob) | ✅ |
+| `Sed.Rendering` | `Camera` (+ fly basis), `Mesh`, `SceneBuilder`, `TextureLookup`, **`Picker`** (screen→ray, ray/triangle, nearest surface), `PngWriter` | ✅ |
+| `Sed.Rendering.Vulkan` | Silk.NET backend; textured `SceneRenderer` (descriptor-set textures, depth, MVP) + **depth-off selection-highlight overlay** | ✅ verified on M4 Pro |
+| `Sed.App` | Avalonia shell + `VulkanView` (fly camera + click-pick); **Game menu configures per-game install dirs (`AppSettings`), auto-loads levels+textures from the base folder**; File ▸ Open for loose .jkl/.gob | ✅ |
 | `tools/Sed.GobTool`, `Sed.JklProbe`, `Sed.MatTool`, `Sed.LevelRender` | GOB list / JKL render / MAT→PNG / **textured level → PNG** | ✅ |
 | `tools/Sed.VulkanSmoke`, `Sed.TriangleProbe`, `Sed.SceneProbe`, `Sed.AppShot` | bring-up + capture probes | ✅ |
 | `tests/Sed.Core.Tests` | xUnit | ✅ 19 passing |
@@ -101,7 +101,9 @@ length, char[128] name }. Names use `\` separators (e.g. `jkl\01narshadda.jkl`).
      `09fuelstation` (966 sectors), `14tower` render textured (`Sed.LevelRender`).
      Preview lighting biases intensity toward bright (JK bakes most light into
      the colormap tables, so raw vertex intensities are near-zero — `SceneBuilder.Light`).
-8. Camera WASD/fly navigation, surface/thing picking, then editing + undo.
+8. ~~Fly camera navigation + surface picking~~ ✅ `Picker` (unit-tested) +
+   `VulkanView` fly controls + `SceneRenderer.SetSelection` highlight. **Next:**
+   thing picking/placement, then editing (move verts/surfaces) + undo.
    Later: real colormap-table lighting, transparency/alpha materials, 3DO models.
 
 ### MAT / CMP formats (from `src/graph_files.pas`)
@@ -114,6 +116,18 @@ cel TextureData{int w, int h, 3×int pad, int numMips} + mip pixels (largest
 first), 8-bit palette indices. Texture coords in JKL are in texels (UV × material
 size), so the renderer needs material dimensions to normalize — `MatFile` exposes
 `Width`/`Height`.
+
+### Game install resolution (`Game/GameInstall`, mirrors `U_OPTIONS.PAS`)
+
+Per game a single **base install dir** is configured; resources are found under it
+case-insensitively in `Episode/` and `Resource/` (the original's FindGobJK/FindGoo):
+- **Jedi Knight**: levels `Episode/Jk1.gob`; resources `Resource/Res2.gob` (MAT/CMP),
+  `Resource/Res1hi.gob`.
+- **MotS**: `Jkm.goo` / `Jkmres.goo`. **IJIM**: `CD1.GOB` / `CD2.GOB`.
+
+`AppSettings` (Sed.App) persists the dirs as JSON under the OS app-data dir
+(macOS: `~/Library/Application Support/SED/settings.json`). The app auto-opens a
+configured game on startup. Material lookups search the resource archives.
 
 ### JKL format notes (from `src/LEVEL_IO.INC`)
 

@@ -18,6 +18,25 @@ using var ctx = VulkanContext.Create("SED Scene Probe");
 using var device = VulkanDevice.Create(ctx);
 using var renderer = new SceneRenderer(device);
 renderer.SetMesh(mesh);
+
+// Validate picking + selection overlay: pick through the screen centre and
+// highlight whichever cube face the ray strikes.
+var ray = Picker.ScreenPointToRay(camera, Width / 2.0, Height / 2.0, Width, Height);
+var hit = Picker.Pick(level, ray);
+if (hit is not null)
+{
+    Console.WriteLine($"Picked sector {hit.Sector.Num} surface {hit.Surface.Num} at dist {hit.Distance:0.00}");
+    var sel = new Mesh();
+    var col = new ColorF(1f, 0.9f, 0.2f);
+    var c0 = hit.Surface.Corners[0].Vertex.Position;
+    for (int i = 1; i + 1 < hit.Surface.Corners.Count; i++)
+        sel.AddTriangle(
+            new MeshVertex(c0, hit.Surface.Normal, col),
+            new MeshVertex(hit.Surface.Corners[i].Vertex.Position, hit.Surface.Normal, col),
+            new MeshVertex(hit.Surface.Corners[i + 1].Vertex.Position, hit.Surface.Normal, col));
+    renderer.SetSelection(sel);
+}
+
 var pixels = renderer.Render(mvp, Width, Height);
 
 PngWriter.Write(outPath, pixels, (int)Width, (int)Height);
