@@ -94,12 +94,17 @@ public static class JklParser
     {
         bool ijim = level.Kind == ProjectType.InfernalMachine;
 
-        // Colormaps (absent for IJIM).
+        // Colormaps (absent for IJIM): "i: name.cmp"
         if (!ijim)
         {
             r.Next();
             int nc = LastInt(r.Current);
-            for (int i = 0; i < nc; i++) r.Next();
+            for (int i = 0; i < nc; i++)
+            {
+                r.Next();
+                var name = JklReader.WordAt(JklReader.StripIndex(r.Current), 0);
+                if (name.Length > 0) level.ColorMaps.Add(name);
+            }
         }
 
         // World vertices: "i: x y z"

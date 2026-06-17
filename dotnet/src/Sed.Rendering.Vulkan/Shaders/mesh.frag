@@ -1,16 +1,14 @@
 #version 450
 
+layout(set = 0, binding = 0) uniform sampler2D tex;
+
 layout(location = 0) in vec3 vColor;
-layout(location = 1) in vec3 vNormal;
+layout(location = 1) in vec2 vUv;
 layout(location = 0) out vec4 outColor;
 
 void main()
 {
-    vec3 n = normalize(vNormal);
-    vec3 lightDir = normalize(vec3(0.35, 0.5, 0.8));
-    // Two-sided lambert so face winding does not affect shading.
-    float diff = abs(dot(n, lightDir));
-    float ambient = 0.28;
-    vec3 lit = vColor * (ambient + diff * 0.8);
-    outColor = vec4(lit, 1.0);
+    vec4 t = texture(tex, vUv);
+    if (t.a < 0.5) discard;                 // palette-index-0 transparency cutout
+    outColor = vec4(t.rgb * vColor, 1.0);   // modulate texture by per-vertex light
 }

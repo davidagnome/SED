@@ -49,11 +49,18 @@ public sealed class VulkanView : Control
         SetLevel(level);
     }
 
-    /// <summary>Loads a level: rebuilds the mesh, frames the camera to its bounds, and redraws.</summary>
-    public void SetLevel(Level level)
+    /// <summary>
+    /// Loads a level, frames the camera to its bounds, and redraws. When a
+    /// <paramref name="textures"/> lookup is given the level is drawn textured;
+    /// otherwise it falls back to flat per-surface hues.
+    /// </summary>
+    public void SetLevel(Level level, TextureLookup? textures = null)
     {
         if (_renderer is null) return;
-        _renderer.SetMesh(SceneBuilder.FromLevel(level));
+        if (textures is not null)
+            _renderer.SetScene(SceneBuilder.BuildScene(level), textures);
+        else
+            _renderer.SetMesh(SceneBuilder.FromLevel(level));
 
         var box = Box.Empty;
         foreach (var sector in level.Sectors)

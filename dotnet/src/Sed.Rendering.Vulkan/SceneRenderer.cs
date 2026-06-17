@@ -9,10 +9,11 @@ using VkBuffer = Silk.NET.Vulkan.Buffer;
 namespace Sed.Rendering.Vulkan;
 
 /// <summary>
-/// Renders an indexed <see cref="Mesh"/> with a perspective MVP and depth test
-/// to an offscreen image, reading the result back as RGBA8. Targets are
-/// (re)created on size change; the pipeline uses dynamic viewport/scissor so a
-/// resize does not rebuild it. Pixels feed the Avalonia viewport bitmap.
+/// Renders a textured, depth-tested <see cref="RenderScene"/> to an offscreen
+/// image and reads it back as RGBA8. Each submesh's material is uploaded as a
+/// sampled texture and bound via a descriptor set; the fragment shader modulates
+/// it by the per-vertex light intensity. Falls back to a white texture for
+/// missing materials. Targets are recreated on size change.
 /// </summary>
 public sealed unsafe class SceneRenderer : IDisposable
 {
@@ -23,15 +24,24 @@ public sealed unsafe class SceneRenderer : IDisposable
     private readonly Vk _vk;
 
     private RenderPass _renderPass;
+    private DescriptorSetLayout _setLayout;
+    private Sampler _sampler;
     private PipelineLayout _layout;
     private Pipeline _pipeline;
+
+    // Persistent 1x1 white fallback texture.
+    private GpuTexture _white;
 
     // Geometry
     private VkBuffer _vertexBuffer;
     private DeviceMemory _vertexMemory;
     private VkBuffer _indexBuffer;
     private DeviceMemory _indexMemory;
-    private uint _indexCount;
+
+    // Per-scene resources
+    private DescriptorPool _descPool;
+    private readonly List<GpuTexture> _sceneTextures = new();
+    private readonly List<DrawItem> _draws = new();
 
     // Size-dependent targets
     private uint _width, _height;
@@ -42,30 +52,76 @@ public sealed unsafe class SceneRenderer : IDisposable
     private VkBuffer _readback;
     private DeviceMemory _readbackMem;
 
+    private readonly record struct DrawItem(DescriptorSet Set, uint IndexOffset, uint IndexCount);
+
+    private struct GpuTexture
+    {
+        public Image Image;
+        public DeviceMemory Memory;
+        public ImageView View;
+        public DescriptorSet Set;
+    }
+
     public SceneRenderer(VulkanDevice device)
     {
         _dev = device;
         _vk = device.Vk;
         CreateRenderPass();
+        CreateSampler();
+        CreateDescriptorSetLayout();
         CreatePipeline();
+        _white = CreateTextureImage(new byte[] { 255, 255, 255, 255 }, 1, 1);
     }
 
+    /// <summary>Convenience for untextured geometry: one white-textured submesh.</summary>
     public void SetMesh(Mesh mesh)
     {
-        DestroyGeometry();
-        if (mesh.IsEmpty) { _indexCount = 0; return; }
+        var scene = new RenderScene();
+        scene.Mesh.Vertices.AddRange(mesh.Vertices);
+        scene.Mesh.Indices.AddRange(mesh.Indices);
+        scene.Submeshes.Add(new Submesh { Material = "", IndexOffset = 0, IndexCount = mesh.Indices.Count });
+        SetScene(scene, _ => null);
+    }
 
-        var verts = mesh.Vertices.ToArray();
-        var indices = mesh.Indices.ToArray();
-        _indexCount = (uint)indices.Length;
+    /// <summary>Uploads scene geometry and per-material textures.</summary>
+    public void SetScene(RenderScene scene, TextureLookup lookup)
+    {
+        DestroyScene();
+        if (scene.Mesh.IsEmpty) return;
 
+        var verts = scene.Mesh.Vertices.ToArray();
+        var indices = scene.Mesh.Indices.ToArray();
         (_vertexBuffer, _vertexMemory) = CreateHostBuffer(
             (ulong)(verts.Length * (int)MeshVertex.Stride), BufferUsageFlags.VertexBufferBit);
         Upload(_vertexMemory, MemoryMarshal.AsBytes<MeshVertex>(verts));
-
         (_indexBuffer, _indexMemory) = CreateHostBuffer(
             (ulong)(indices.Length * sizeof(uint)), BufferUsageFlags.IndexBufferBit);
         Upload(_indexMemory, MemoryMarshal.AsBytes<uint>(indices));
+
+        CreateDescriptorPool((uint)scene.Submeshes.Count + 1);
+        _white.Set = AllocateTextureDescriptor(_white.View);
+
+        var materialSets = new Dictionary<string, DescriptorSet>(StringComparer.OrdinalIgnoreCase);
+        foreach (var sub in scene.Submeshes)
+        {
+            DescriptorSet set;
+            if (string.IsNullOrEmpty(sub.Material))
+                set = _white.Set;
+            else if (!materialSets.TryGetValue(sub.Material, out set))
+            {
+                var tex = lookup(sub.Material);
+                if (tex is { } t && t.Rgba.Length == t.Width * t.Height * 4)
+                {
+                    var gpu = CreateTextureImage(t.Rgba, (uint)t.Width, (uint)t.Height);
+                    gpu.Set = AllocateTextureDescriptor(gpu.View);
+                    _sceneTextures.Add(gpu);
+                    set = gpu.Set;
+                }
+                else set = _white.Set;
+                materialSets[sub.Material] = set;
+            }
+            _draws.Add(new DrawItem(set, (uint)sub.IndexOffset, (uint)sub.IndexCount));
+        }
     }
 
     /// <summary>Renders one frame and returns tightly-packed RGBA8 pixels.</summary>
@@ -73,7 +129,6 @@ public sealed unsafe class SceneRenderer : IDisposable
         float clearR = 0.05f, float clearG = 0.05f, float clearB = 0.08f)
     {
         EnsureTargets(width, height);
-
         var cmd = BeginOneTimeCommands();
 
         var clears = stackalloc ClearValue[2];
@@ -96,10 +151,9 @@ public sealed unsafe class SceneRenderer : IDisposable
         _vk.CmdSetViewport(cmd, 0, 1, in viewport);
         _vk.CmdSetScissor(cmd, 0, 1, in scissor);
 
-        if (_indexCount > 0)
+        if (_draws.Count > 0)
         {
             _vk.CmdBindPipeline(cmd, PipelineBindPoint.Graphics, _pipeline);
-
             fixed (float* mvp = viewProjection.M)
                 _vk.CmdPushConstants(cmd, _layout, ShaderStageFlags.VertexBit, 0, 64, mvp);
 
@@ -107,7 +161,13 @@ public sealed unsafe class SceneRenderer : IDisposable
             ulong offset = 0;
             _vk.CmdBindVertexBuffers(cmd, 0, 1, in vb, in offset);
             _vk.CmdBindIndexBuffer(cmd, _indexBuffer, 0, IndexType.Uint32);
-            _vk.CmdDrawIndexed(cmd, _indexCount, 1, 0, 0, 0);
+
+            foreach (var draw in _draws)
+            {
+                var set = draw.Set;
+                _vk.CmdBindDescriptorSets(cmd, PipelineBindPoint.Graphics, _layout, 0, 1, in set, 0, null);
+                _vk.CmdDrawIndexed(cmd, draw.IndexCount, 1, draw.IndexOffset, 0, 0);
+            }
         }
 
         _vk.CmdEndRenderPass(cmd);
@@ -121,7 +181,6 @@ public sealed unsafe class SceneRenderer : IDisposable
             ImageExtent = new Extent3D(_width, _height, 1),
         };
         _vk.CmdCopyImageToBuffer(cmd, _color, ImageLayout.TransferSrcOptimal, _readback, 1, &region);
-
         EndSubmitAndWait(cmd);
 
         int size = (int)(_width * _height * 4);
@@ -133,64 +192,121 @@ public sealed unsafe class SceneRenderer : IDisposable
         return pixels;
     }
 
-    // ---- setup ----
+    // ---- pipeline / descriptors ----
 
     private void CreateRenderPass()
     {
         var attachments = stackalloc AttachmentDescription[2];
         attachments[0] = new AttachmentDescription
         {
-            Format = ColorFormat,
-            Samples = SampleCountFlags.Count1Bit,
-            LoadOp = AttachmentLoadOp.Clear,
-            StoreOp = AttachmentStoreOp.Store,
-            StencilLoadOp = AttachmentLoadOp.DontCare,
-            StencilStoreOp = AttachmentStoreOp.DontCare,
-            InitialLayout = ImageLayout.Undefined,
-            FinalLayout = ImageLayout.TransferSrcOptimal,
+            Format = ColorFormat, Samples = SampleCountFlags.Count1Bit,
+            LoadOp = AttachmentLoadOp.Clear, StoreOp = AttachmentStoreOp.Store,
+            StencilLoadOp = AttachmentLoadOp.DontCare, StencilStoreOp = AttachmentStoreOp.DontCare,
+            InitialLayout = ImageLayout.Undefined, FinalLayout = ImageLayout.TransferSrcOptimal,
         };
         attachments[1] = new AttachmentDescription
         {
-            Format = DepthFormat,
-            Samples = SampleCountFlags.Count1Bit,
-            LoadOp = AttachmentLoadOp.Clear,
-            StoreOp = AttachmentStoreOp.DontCare,
-            StencilLoadOp = AttachmentLoadOp.DontCare,
-            StencilStoreOp = AttachmentStoreOp.DontCare,
-            InitialLayout = ImageLayout.Undefined,
-            FinalLayout = ImageLayout.DepthStencilAttachmentOptimal,
+            Format = DepthFormat, Samples = SampleCountFlags.Count1Bit,
+            LoadOp = AttachmentLoadOp.Clear, StoreOp = AttachmentStoreOp.DontCare,
+            StencilLoadOp = AttachmentLoadOp.DontCare, StencilStoreOp = AttachmentStoreOp.DontCare,
+            InitialLayout = ImageLayout.Undefined, FinalLayout = ImageLayout.DepthStencilAttachmentOptimal,
         };
-
         var colorRef = new AttachmentReference(0, ImageLayout.ColorAttachmentOptimal);
         var depthRef = new AttachmentReference(1, ImageLayout.DepthStencilAttachmentOptimal);
         var subpass = new SubpassDescription
         {
             PipelineBindPoint = PipelineBindPoint.Graphics,
-            ColorAttachmentCount = 1,
-            PColorAttachments = &colorRef,
-            PDepthStencilAttachment = &depthRef,
+            ColorAttachmentCount = 1, PColorAttachments = &colorRef, PDepthStencilAttachment = &depthRef,
         };
         var dependency = new SubpassDependency
         {
-            SrcSubpass = 0,
-            DstSubpass = Vk.SubpassExternal,
+            SrcSubpass = 0, DstSubpass = Vk.SubpassExternal,
             SrcStageMask = PipelineStageFlags.ColorAttachmentOutputBit,
             SrcAccessMask = AccessFlags.ColorAttachmentWriteBit,
-            DstStageMask = PipelineStageFlags.TransferBit,
-            DstAccessMask = AccessFlags.TransferReadBit,
+            DstStageMask = PipelineStageFlags.TransferBit, DstAccessMask = AccessFlags.TransferReadBit,
         };
         var rpInfo = new RenderPassCreateInfo
         {
             SType = StructureType.RenderPassCreateInfo,
-            AttachmentCount = 2,
-            PAttachments = attachments,
-            SubpassCount = 1,
-            PSubpasses = &subpass,
-            DependencyCount = 1,
-            PDependencies = &dependency,
+            AttachmentCount = 2, PAttachments = attachments,
+            SubpassCount = 1, PSubpasses = &subpass, DependencyCount = 1, PDependencies = &dependency,
         };
         if (_vk.CreateRenderPass(_dev.Device, in rpInfo, null, out _renderPass) != Result.Success)
             throw new VulkanException("vkCreateRenderPass failed");
+    }
+
+    private void CreateSampler()
+    {
+        var info = new SamplerCreateInfo
+        {
+            SType = StructureType.SamplerCreateInfo,
+            MagFilter = Filter.Nearest, MinFilter = Filter.Nearest,
+            MipmapMode = SamplerMipmapMode.Nearest,
+            AddressModeU = SamplerAddressMode.Repeat,
+            AddressModeV = SamplerAddressMode.Repeat,
+            AddressModeW = SamplerAddressMode.Repeat,
+        };
+        if (_vk.CreateSampler(_dev.Device, in info, null, out _sampler) != Result.Success)
+            throw new VulkanException("vkCreateSampler failed");
+    }
+
+    private void CreateDescriptorSetLayout()
+    {
+        var binding = new DescriptorSetLayoutBinding
+        {
+            Binding = 0,
+            DescriptorType = DescriptorType.CombinedImageSampler,
+            DescriptorCount = 1,
+            StageFlags = ShaderStageFlags.FragmentBit,
+        };
+        var info = new DescriptorSetLayoutCreateInfo
+        {
+            SType = StructureType.DescriptorSetLayoutCreateInfo,
+            BindingCount = 1, PBindings = &binding,
+        };
+        if (_vk.CreateDescriptorSetLayout(_dev.Device, in info, null, out _setLayout) != Result.Success)
+            throw new VulkanException("vkCreateDescriptorSetLayout failed");
+    }
+
+    private void CreateDescriptorPool(uint maxSets)
+    {
+        DestroyDescriptorPool();
+        var size = new DescriptorPoolSize
+        {
+            Type = DescriptorType.CombinedImageSampler, DescriptorCount = maxSets,
+        };
+        var info = new DescriptorPoolCreateInfo
+        {
+            SType = StructureType.DescriptorPoolCreateInfo,
+            MaxSets = maxSets, PoolSizeCount = 1, PPoolSizes = &size,
+        };
+        if (_vk.CreateDescriptorPool(_dev.Device, in info, null, out _descPool) != Result.Success)
+            throw new VulkanException("vkCreateDescriptorPool failed");
+    }
+
+    private DescriptorSet AllocateTextureDescriptor(ImageView view)
+    {
+        var layout = _setLayout;
+        var alloc = new DescriptorSetAllocateInfo
+        {
+            SType = StructureType.DescriptorSetAllocateInfo,
+            DescriptorPool = _descPool, DescriptorSetCount = 1, PSetLayouts = &layout,
+        };
+        if (_vk.AllocateDescriptorSets(_dev.Device, in alloc, out var set) != Result.Success)
+            throw new VulkanException("vkAllocateDescriptorSets failed");
+
+        var imageInfo = new DescriptorImageInfo
+        {
+            Sampler = _sampler, ImageView = view, ImageLayout = ImageLayout.ShaderReadOnlyOptimal,
+        };
+        var write = new WriteDescriptorSet
+        {
+            SType = StructureType.WriteDescriptorSet,
+            DstSet = set, DstBinding = 0, DescriptorCount = 1,
+            DescriptorType = DescriptorType.CombinedImageSampler, PImageInfo = &imageInfo,
+        };
+        _vk.UpdateDescriptorSets(_dev.Device, 1, in write, 0, null);
+        return set;
     }
 
     private void CreatePipeline()
@@ -216,19 +332,17 @@ public sealed unsafe class SceneRenderer : IDisposable
             {
                 Binding = 0, Stride = MeshVertex.Stride, InputRate = VertexInputRate.Vertex,
             };
-            var attrs = stackalloc VertexInputAttributeDescription[3];
+            var attrs = stackalloc VertexInputAttributeDescription[4];
             attrs[0] = new VertexInputAttributeDescription(0, 0, Format.R32G32B32Sfloat, 0);
             attrs[1] = new VertexInputAttributeDescription(1, 0, Format.R32G32B32Sfloat, 12);
             attrs[2] = new VertexInputAttributeDescription(2, 0, Format.R32G32B32Sfloat, 24);
+            attrs[3] = new VertexInputAttributeDescription(3, 0, Format.R32G32Sfloat, 36);
             var vertexInput = new PipelineVertexInputStateCreateInfo
             {
                 SType = StructureType.PipelineVertexInputStateCreateInfo,
-                VertexBindingDescriptionCount = 1,
-                PVertexBindingDescriptions = &binding,
-                VertexAttributeDescriptionCount = 3,
-                PVertexAttributeDescriptions = attrs,
+                VertexBindingDescriptionCount = 1, PVertexBindingDescriptions = &binding,
+                VertexAttributeDescriptionCount = 4, PVertexAttributeDescriptions = attrs,
             };
-
             var inputAssembly = new PipelineInputAssemblyStateCreateInfo
             {
                 SType = StructureType.PipelineInputAssemblyStateCreateInfo,
@@ -236,16 +350,13 @@ public sealed unsafe class SceneRenderer : IDisposable
             };
             var viewportState = new PipelineViewportStateCreateInfo
             {
-                SType = StructureType.PipelineViewportStateCreateInfo,
-                ViewportCount = 1, ScissorCount = 1,
+                SType = StructureType.PipelineViewportStateCreateInfo, ViewportCount = 1, ScissorCount = 1,
             };
             var raster = new PipelineRasterizationStateCreateInfo
             {
                 SType = StructureType.PipelineRasterizationStateCreateInfo,
-                PolygonMode = PolygonMode.Fill,
-                CullMode = CullModeFlags.None,
-                FrontFace = FrontFace.CounterClockwise,
-                LineWidth = 1f,
+                PolygonMode = PolygonMode.Fill, CullMode = CullModeFlags.None,
+                FrontFace = FrontFace.CounterClockwise, LineWidth = 1f,
             };
             var multisample = new PipelineMultisampleStateCreateInfo
             {
@@ -255,9 +366,7 @@ public sealed unsafe class SceneRenderer : IDisposable
             var depthStencil = new PipelineDepthStencilStateCreateInfo
             {
                 SType = StructureType.PipelineDepthStencilStateCreateInfo,
-                DepthTestEnable = true,
-                DepthWriteEnable = true,
-                DepthCompareOp = CompareOp.Less,
+                DepthTestEnable = true, DepthWriteEnable = true, DepthCompareOp = CompareOp.Less,
             };
             var blendAttachment = new PipelineColorBlendAttachmentState
             {
@@ -270,7 +379,6 @@ public sealed unsafe class SceneRenderer : IDisposable
                 SType = StructureType.PipelineColorBlendStateCreateInfo,
                 AttachmentCount = 1, PAttachments = &blendAttachment,
             };
-
             var dynamicStates = stackalloc DynamicState[2] { DynamicState.Viewport, DynamicState.Scissor };
             var dynamic = new PipelineDynamicStateCreateInfo
             {
@@ -279,9 +387,11 @@ public sealed unsafe class SceneRenderer : IDisposable
             };
 
             var pushRange = new PushConstantRange(ShaderStageFlags.VertexBit, 0, 64);
+            var setLayout = _setLayout;
             var layoutInfo = new PipelineLayoutCreateInfo
             {
                 SType = StructureType.PipelineLayoutCreateInfo,
+                SetLayoutCount = 1, PSetLayouts = &setLayout,
                 PushConstantRangeCount = 1, PPushConstantRanges = &pushRange,
             };
             if (_vk.CreatePipelineLayout(_dev.Device, in layoutInfo, null, out _layout) != Result.Success)
@@ -291,17 +401,11 @@ public sealed unsafe class SceneRenderer : IDisposable
             {
                 SType = StructureType.GraphicsPipelineCreateInfo,
                 StageCount = 2, PStages = stages,
-                PVertexInputState = &vertexInput,
-                PInputAssemblyState = &inputAssembly,
-                PViewportState = &viewportState,
-                PRasterizationState = &raster,
-                PMultisampleState = &multisample,
-                PDepthStencilState = &depthStencil,
-                PColorBlendState = &blend,
-                PDynamicState = &dynamic,
-                Layout = _layout,
-                RenderPass = _renderPass,
-                Subpass = 0,
+                PVertexInputState = &vertexInput, PInputAssemblyState = &inputAssembly,
+                PViewportState = &viewportState, PRasterizationState = &raster,
+                PMultisampleState = &multisample, PDepthStencilState = &depthStencil,
+                PColorBlendState = &blend, PDynamicState = &dynamic,
+                Layout = _layout, RenderPass = _renderPass, Subpass = 0,
             };
             if (_vk.CreateGraphicsPipelines(_dev.Device, default, 1, in info, null, out _pipeline) != Result.Success)
                 throw new VulkanException("vkCreateGraphicsPipelines failed");
@@ -314,90 +418,149 @@ public sealed unsafe class SceneRenderer : IDisposable
         }
     }
 
+    // ---- textures ----
+
+    private GpuTexture CreateTextureImage(byte[] rgba, uint w, uint h)
+    {
+        var imgInfo = new ImageCreateInfo
+        {
+            SType = StructureType.ImageCreateInfo, ImageType = ImageType.Type2D,
+            Format = Format.R8G8B8A8Unorm, Extent = new Extent3D(w, h, 1),
+            MipLevels = 1, ArrayLayers = 1, Samples = SampleCountFlags.Count1Bit,
+            Tiling = ImageTiling.Optimal,
+            Usage = ImageUsageFlags.TransferDstBit | ImageUsageFlags.SampledBit,
+            SharingMode = SharingMode.Exclusive, InitialLayout = ImageLayout.Undefined,
+        };
+        if (_vk.CreateImage(_dev.Device, in imgInfo, null, out var image) != Result.Success)
+            throw new VulkanException("vkCreateImage (texture) failed");
+        _vk.GetImageMemoryRequirements(_dev.Device, image, out var reqs);
+        var alloc = new MemoryAllocateInfo
+        {
+            SType = StructureType.MemoryAllocateInfo, AllocationSize = reqs.Size,
+            MemoryTypeIndex = _dev.FindMemoryType(reqs.MemoryTypeBits, MemoryPropertyFlags.DeviceLocalBit),
+        };
+        if (_vk.AllocateMemory(_dev.Device, in alloc, null, out var memory) != Result.Success)
+            throw new VulkanException("vkAllocateMemory (texture) failed");
+        _vk.BindImageMemory(_dev.Device, image, memory, 0);
+
+        var (staging, stagingMem) = CreateHostBuffer((ulong)rgba.Length, BufferUsageFlags.TransferSrcBit);
+        Upload(stagingMem, rgba);
+
+        var cmd = BeginOneTimeCommands();
+        TransitionLayout(cmd, image, ImageLayout.Undefined, ImageLayout.TransferDstOptimal,
+            PipelineStageFlags.TopOfPipeBit, PipelineStageFlags.TransferBit,
+            0, AccessFlags.TransferWriteBit);
+        var copy = new BufferImageCopy
+        {
+            ImageSubresource = new ImageSubresourceLayers
+            {
+                AspectMask = ImageAspectFlags.ColorBit, MipLevel = 0, BaseArrayLayer = 0, LayerCount = 1,
+            },
+            ImageExtent = new Extent3D(w, h, 1),
+        };
+        _vk.CmdCopyBufferToImage(cmd, staging, image, ImageLayout.TransferDstOptimal, 1, &copy);
+        TransitionLayout(cmd, image, ImageLayout.TransferDstOptimal, ImageLayout.ShaderReadOnlyOptimal,
+            PipelineStageFlags.TransferBit, PipelineStageFlags.FragmentShaderBit,
+            AccessFlags.TransferWriteBit, AccessFlags.ShaderReadBit);
+        EndSubmitAndWait(cmd);
+
+        _vk.DestroyBuffer(_dev.Device, staging, null);
+        _vk.FreeMemory(_dev.Device, stagingMem, null);
+
+        var viewInfo = new ImageViewCreateInfo
+        {
+            SType = StructureType.ImageViewCreateInfo, Image = image,
+            ViewType = ImageViewType.Type2D, Format = Format.R8G8B8A8Unorm,
+            SubresourceRange = new ImageSubresourceRange(ImageAspectFlags.ColorBit, 0, 1, 0, 1),
+        };
+        if (_vk.CreateImageView(_dev.Device, in viewInfo, null, out var view) != Result.Success)
+            throw new VulkanException("vkCreateImageView (texture) failed");
+
+        return new GpuTexture { Image = image, Memory = memory, View = view };
+    }
+
+    private void TransitionLayout(CommandBuffer cmd, Image image, ImageLayout oldL, ImageLayout newL,
+        PipelineStageFlags srcStage, PipelineStageFlags dstStage, AccessFlags srcAccess, AccessFlags dstAccess)
+    {
+        var barrier = new ImageMemoryBarrier
+        {
+            SType = StructureType.ImageMemoryBarrier,
+            OldLayout = oldL, NewLayout = newL,
+            SrcQueueFamilyIndex = Vk.QueueFamilyIgnored, DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
+            Image = image, SrcAccessMask = srcAccess, DstAccessMask = dstAccess,
+            SubresourceRange = new ImageSubresourceRange(ImageAspectFlags.ColorBit, 0, 1, 0, 1),
+        };
+        _vk.CmdPipelineBarrier(cmd, srcStage, dstStage, 0, 0, null, 0, null, 1, in barrier);
+    }
+
+    // ---- targets ----
+
     private void EnsureTargets(uint width, uint height)
     {
-        if (width == _width && height == _height && _framebuffer.Handle != 0)
-            return;
-
+        if (width == _width && height == _height && _framebuffer.Handle != 0) return;
         DestroyTargets();
-        _width = width;
-        _height = height;
+        _width = width; _height = height;
 
-        (_color, _colorMem, _colorView) = CreateImage(ColorFormat,
+        (_color, _colorMem, _colorView) = CreateAttachment(ColorFormat,
             ImageUsageFlags.ColorAttachmentBit | ImageUsageFlags.TransferSrcBit, ImageAspectFlags.ColorBit);
-        (_depth, _depthMem, _depthView) = CreateImage(DepthFormat,
+        (_depth, _depthMem, _depthView) = CreateAttachment(DepthFormat,
             ImageUsageFlags.DepthStencilAttachmentBit, ImageAspectFlags.DepthBit);
 
         var views = stackalloc ImageView[2] { _colorView, _depthView };
         var fbInfo = new FramebufferCreateInfo
         {
-            SType = StructureType.FramebufferCreateInfo,
-            RenderPass = _renderPass,
-            AttachmentCount = 2, PAttachments = views,
-            Width = _width, Height = _height, Layers = 1,
+            SType = StructureType.FramebufferCreateInfo, RenderPass = _renderPass,
+            AttachmentCount = 2, PAttachments = views, Width = _width, Height = _height, Layers = 1,
         };
         if (_vk.CreateFramebuffer(_dev.Device, in fbInfo, null, out _framebuffer) != Result.Success)
             throw new VulkanException("vkCreateFramebuffer failed");
-
         (_readback, _readbackMem) = CreateHostBuffer((ulong)(_width * _height * 4), BufferUsageFlags.TransferDstBit);
     }
 
-    private (Image, DeviceMemory, ImageView) CreateImage(Format format, ImageUsageFlags usage, ImageAspectFlags aspect)
+    private (Image, DeviceMemory, ImageView) CreateAttachment(Format format, ImageUsageFlags usage, ImageAspectFlags aspect)
     {
         var info = new ImageCreateInfo
         {
-            SType = StructureType.ImageCreateInfo,
-            ImageType = ImageType.Type2D,
-            Format = format,
-            Extent = new Extent3D(_width, _height, 1),
-            MipLevels = 1, ArrayLayers = 1,
-            Samples = SampleCountFlags.Count1Bit,
-            Tiling = ImageTiling.Optimal,
-            Usage = usage,
-            SharingMode = SharingMode.Exclusive,
-            InitialLayout = ImageLayout.Undefined,
+            SType = StructureType.ImageCreateInfo, ImageType = ImageType.Type2D, Format = format,
+            Extent = new Extent3D(_width, _height, 1), MipLevels = 1, ArrayLayers = 1,
+            Samples = SampleCountFlags.Count1Bit, Tiling = ImageTiling.Optimal, Usage = usage,
+            SharingMode = SharingMode.Exclusive, InitialLayout = ImageLayout.Undefined,
         };
         if (_vk.CreateImage(_dev.Device, in info, null, out var image) != Result.Success)
             throw new VulkanException("vkCreateImage failed");
-
         _vk.GetImageMemoryRequirements(_dev.Device, image, out var reqs);
         var alloc = new MemoryAllocateInfo
         {
-            SType = StructureType.MemoryAllocateInfo,
-            AllocationSize = reqs.Size,
+            SType = StructureType.MemoryAllocateInfo, AllocationSize = reqs.Size,
             MemoryTypeIndex = _dev.FindMemoryType(reqs.MemoryTypeBits, MemoryPropertyFlags.DeviceLocalBit),
         };
         if (_vk.AllocateMemory(_dev.Device, in alloc, null, out var memory) != Result.Success)
-            throw new VulkanException("vkAllocateMemory (image) failed");
+            throw new VulkanException("vkAllocateMemory failed");
         _vk.BindImageMemory(_dev.Device, image, memory, 0);
-
         var viewInfo = new ImageViewCreateInfo
         {
-            SType = StructureType.ImageViewCreateInfo,
-            Image = image, ViewType = ImageViewType.Type2D, Format = format,
-            SubresourceRange = new ImageSubresourceRange(aspect, 0, 1, 0, 1),
+            SType = StructureType.ImageViewCreateInfo, Image = image, ViewType = ImageViewType.Type2D,
+            Format = format, SubresourceRange = new ImageSubresourceRange(aspect, 0, 1, 0, 1),
         };
         if (_vk.CreateImageView(_dev.Device, in viewInfo, null, out var view) != Result.Success)
             throw new VulkanException("vkCreateImageView failed");
-
         return (image, memory, view);
     }
+
+    // ---- helpers ----
 
     private (VkBuffer, DeviceMemory) CreateHostBuffer(ulong size, BufferUsageFlags usage)
     {
         var info = new BufferCreateInfo
         {
-            SType = StructureType.BufferCreateInfo,
-            Size = size, Usage = usage, SharingMode = SharingMode.Exclusive,
+            SType = StructureType.BufferCreateInfo, Size = size, Usage = usage, SharingMode = SharingMode.Exclusive,
         };
         if (_vk.CreateBuffer(_dev.Device, in info, null, out var buffer) != Result.Success)
             throw new VulkanException("vkCreateBuffer failed");
-
         _vk.GetBufferMemoryRequirements(_dev.Device, buffer, out var reqs);
         var alloc = new MemoryAllocateInfo
         {
-            SType = StructureType.MemoryAllocateInfo,
-            AllocationSize = reqs.Size,
+            SType = StructureType.MemoryAllocateInfo, AllocationSize = reqs.Size,
             MemoryTypeIndex = _dev.FindMemoryType(reqs.MemoryTypeBits,
                 MemoryPropertyFlags.HostVisibleBit | MemoryPropertyFlags.HostCoherentBit),
         };
@@ -429,8 +592,7 @@ public sealed unsafe class SceneRenderer : IDisposable
         {
             var info = new ShaderModuleCreateInfo
             {
-                SType = StructureType.ShaderModuleCreateInfo,
-                CodeSize = (nuint)code.Length, PCode = (uint*)pCode,
+                SType = StructureType.ShaderModuleCreateInfo, CodeSize = (nuint)code.Length, PCode = (uint*)pCode,
             };
             if (_vk.CreateShaderModule(_dev.Device, in info, null, out var module) != Result.Success)
                 throw new VulkanException($"vkCreateShaderModule failed for {nameSuffix}");
@@ -470,9 +632,28 @@ public sealed unsafe class SceneRenderer : IDisposable
         _vk.FreeCommandBuffers(_dev.Device, _dev.CommandPool, 1, in cmd);
     }
 
-    private void DestroyGeometry()
+    // ---- teardown ----
+
+    private void DestroyTexture(GpuTexture t)
     {
         var d = _dev.Device;
+        if (t.View.Handle != 0) _vk.DestroyImageView(d, t.View, null);
+        if (t.Image.Handle != 0) _vk.DestroyImage(d, t.Image, null);
+        if (t.Memory.Handle != 0) _vk.FreeMemory(d, t.Memory, null);
+    }
+
+    private void DestroyDescriptorPool()
+    {
+        if (_descPool.Handle != 0) { _vk.DestroyDescriptorPool(_dev.Device, _descPool, null); _descPool = default; }
+    }
+
+    private void DestroyScene()
+    {
+        var d = _dev.Device;
+        foreach (var t in _sceneTextures) DestroyTexture(t);
+        _sceneTextures.Clear();
+        _draws.Clear();
+        DestroyDescriptorPool(); // frees all descriptor sets (incl. white's)
         if (_vertexBuffer.Handle != 0) { _vk.DestroyBuffer(d, _vertexBuffer, null); _vertexBuffer = default; }
         if (_vertexMemory.Handle != 0) { _vk.FreeMemory(d, _vertexMemory, null); _vertexMemory = default; }
         if (_indexBuffer.Handle != 0) { _vk.DestroyBuffer(d, _indexBuffer, null); _indexBuffer = default; }
@@ -495,11 +676,14 @@ public sealed unsafe class SceneRenderer : IDisposable
 
     public void Dispose()
     {
-        DestroyGeometry();
+        DestroyScene();
         DestroyTargets();
+        DestroyTexture(_white);
         var d = _dev.Device;
         if (_pipeline.Handle != 0) _vk.DestroyPipeline(d, _pipeline, null);
         if (_layout.Handle != 0) _vk.DestroyPipelineLayout(d, _layout, null);
+        if (_setLayout.Handle != 0) _vk.DestroyDescriptorSetLayout(d, _setLayout, null);
+        if (_sampler.Handle != 0) _vk.DestroySampler(d, _sampler, null);
         if (_renderPass.Handle != 0) _vk.DestroyRenderPass(d, _renderPass, null);
     }
 }

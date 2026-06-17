@@ -20,14 +20,12 @@ math. See the repo-root analysis for the full option comparison (Lazarus/LCL vs
 | `Sed.Core` | Math (double-precision `Vec2/3`, `ColorF`, `Box`) + domain model (`Level`, `Sector`, `Surface`, `Vertex`, `Thing`, `Light`, `Cog`, `LevelHeader`) | ✅ builds, unit-tested |
 | `Sed.Formats` | **JKL** (`Jkl/`), **GOB archive** (`Gob/`), **MAT texture + CMP palette** (`Material/`) | ✅ validated on retail JK1/Res2 data |
 | `Sed.Core` | + `Mat4` (column-major, Vulkan-clip perspective/lookat) | ✅ 9 tests |
-| `Sed.Rendering` | `IRenderer`/`Camera` (+ orbit/look-at, view-proj), `Mesh`, `SceneBuilder` (model→mesh), `SampleScene`, `PngWriter` | ✅ |
-| `Sed.Rendering.Vulkan` | Silk.NET backend; MoltenVK locator, logical device, **offscreen triangle** + **3D `SceneRenderer`** (vertex/index buffers, depth, MVP push constant, dynamic viewport) | ✅ verified on M4 Pro |
-| `Sed.App` | Avalonia shell + **live `VulkanView`** (resizable, mouse orbit, wheel zoom) | ✅ renders the sample cube in-window |
-| `tools/Sed.VulkanSmoke` | Vulkan instance/GPU bring-up check | ✅ |
-| `tools/Sed.TriangleProbe` | Offscreen triangle → PNG | ✅ |
-| `tools/Sed.SceneProbe` | 3D cube (model→mesh→MVP→depth) → PNG | ✅ |
-| `tools/Sed.AppShot` | Headless Skia capture of the editor window → PNG | ✅ |
-| `tests/Sed.Core.Tests` | xUnit | ✅ 9 passing |
+| `Sed.Rendering` | `Camera`, `Mesh` (pos/normal/color/uv), `SceneBuilder` (→ material-batched `RenderScene`), `TextureLookup`, `PngWriter` | ✅ |
+| `Sed.Rendering.Vulkan` | Silk.NET backend; MoltenVK locator, logical device, **textured `SceneRenderer`** (vertex/index + depth + MVP push constant + **per-material descriptor sets / sampled textures** + dynamic viewport) | ✅ verified on M4 Pro |
+| `Sed.App` | Avalonia shell + live `VulkanView`; **File ▸ Open loads .jkl/.gob and renders textured levels** (auto-discovers Res2.gob) | ✅ |
+| `tools/Sed.GobTool`, `Sed.JklProbe`, `Sed.MatTool`, `Sed.LevelRender` | GOB list / JKL render / MAT→PNG / **textured level → PNG** | ✅ |
+| `tools/Sed.VulkanSmoke`, `Sed.TriangleProbe`, `Sed.SceneProbe`, `Sed.AppShot` | bring-up + capture probes | ✅ |
+| `tests/Sed.Core.Tests` | xUnit | ✅ 19 passing |
 
 ### Rendering pipeline (verified)
 
@@ -96,12 +94,15 @@ length, char[128] name }. Names use `\` separators (e.g. `jkl\01narshadda.jkl`).
    - 7a. ~~Decode MAT (8-bit indexed texture) + CMP (256-color palette)~~ ✅
      `Material/MatFile` + `Material/Colormap`; `tools/Sed.MatTool` dumps a MAT→PNG.
      Validated against retail textures (cabinet, Nar Shaddaa wall panel, flat color).
-   - 7b. **Wire textures into the Vulkan renderer** (next): per-material mesh
-     batches, `VkImage`+sampler+descriptor sets, sample by the UVs the parser
-     already captures (`Surface.Corner.Uv`); modulate by per-vertex intensity
-     (`Surface.Corner.Intensity`) for Gouraud lighting. Needs a material provider
-     that loads MATs from the resource GOB by name + the level's CMP.
+   - 7b. ~~Wire textures into the renderer~~ ✅ Per-material `Submesh` batches,
+     `VkImage`+sampler+descriptor set per material (`MaterialLibrary` loads MATs
+     from a resource GOB + the level's CMP), sampled by `Surface.Corner.Uv` and
+     modulated by per-vertex intensity. **Validated**: `01narshadda`, `03katarn`,
+     `09fuelstation` (966 sectors), `14tower` render textured (`Sed.LevelRender`).
+     Preview lighting biases intensity toward bright (JK bakes most light into
+     the colormap tables, so raw vertex intensities are near-zero — `SceneBuilder.Light`).
 8. Camera WASD/fly navigation, surface/thing picking, then editing + undo.
+   Later: real colormap-table lighting, transparency/alpha materials, 3DO models.
 
 ### MAT / CMP formats (from `src/graph_files.pas`)
 

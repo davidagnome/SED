@@ -2,21 +2,23 @@ using Sed.Core.Math;
 
 namespace Sed.Rendering;
 
-/// <summary>A GPU-ready vertex: position, normal, and RGB color (interleaved, all float32).</summary>
+/// <summary>A GPU-ready vertex: position, normal, RGB color, and UV (interleaved float32).</summary>
 public struct MeshVertex
 {
     public float Px, Py, Pz;
     public float Nx, Ny, Nz;
     public float R, G, B;
+    public float U, V;
 
-    public MeshVertex(Vec3 p, Vec3 n, ColorF c)
+    public MeshVertex(Vec3 p, Vec3 n, ColorF c, double u = 0, double v = 0)
     {
         Px = (float)p.X; Py = (float)p.Y; Pz = (float)p.Z;
         Nx = (float)n.X; Ny = (float)n.Y; Nz = (float)n.Z;
         R = c.R; G = c.G; B = c.B;
+        U = (float)u; V = (float)v;
     }
 
-    public const uint Stride = 9 * sizeof(float);
+    public const uint Stride = 11 * sizeof(float);
 }
 
 /// <summary>An indexed triangle mesh produced from the level model.</summary>

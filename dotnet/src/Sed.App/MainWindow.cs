@@ -5,6 +5,8 @@ using Avalonia.Media;
 using Avalonia.Platform.Storage;
 using Sed.Formats.Gob;
 using Sed.Formats.Jkl;
+using Sed.Formats.Material;
+using Sed.Rendering;
 
 namespace Sed.App;
 
@@ -21,6 +23,7 @@ public class MainWindow : Window
     private readonly TextBlock _sidePanelHeader;
 
     private GobArchive? _gob;
+    private GobArchive? _resourceGob;
     private List<GobEntry> _gobLevels = new();
 
     public MainWindow()
@@ -98,6 +101,7 @@ public class MainWindow : Window
 
         try
         {
+            DiscoverResourceGob(path);
             if (path.EndsWith(".gob", StringComparison.OrdinalIgnoreCase) ||
                 path.EndsWith(".goo", StringComparison.OrdinalIgnoreCase))
                 OpenArchive(path);
@@ -108,6 +112,44 @@ public class MainWindow : Window
         {
             _status.Text = $"Failed to open {file.Name}: {ex.Message}";
         }
+    }
+
+    /// <summary>Locates a resource GOB (Res2/Res1hi) near the opened file for textures.</summary>
+    private void DiscoverResourceGob(string openedPath)
+    {
+        if (_resourceGob is not null) return;
+
+        var dir = Path.GetDirectoryName(openedPath);
+        var candidates = new List<string>();
+        foreach (var name in new[] { "Res2.gob", "res2.gob", "Res1hi.gob" })
+        {
+            if (dir is not null)
+            {
+                candidates.Add(Path.Combine(dir, name));
+                candidates.Add(Path.Combine(dir, "..", "Resource", name));
+                var parent = Directory.GetParent(dir)?.FullName;
+                if (parent is not null) candidates.Add(Path.Combine(parent, "Resource", name));
+            }
+        }
+
+        foreach (var c in candidates)
+        {
+            if (!File.Exists(c)) continue;
+            try { _resourceGob = GobArchive.Open(c); return; }
+            catch { /* try next */ }
+        }
+    }
+
+    private TextureLookup? MakeTextureLookup(Sed.Core.Model.Level level)
+    {
+        if (_resourceGob is null) return null;
+        var palette = MaterialLibrary.LoadPalette(level.ColorMaps, _resourceGob);
+        var library = new MaterialLibrary(palette, _resourceGob);
+        return material =>
+        {
+            var t = library.Get(material);
+            return t is { } r ? new TextureData(r.Width, r.Height, r.Rgba) : null;
+        };
     }
 
     private void OpenArchive(string path)
@@ -144,10 +186,15 @@ public class MainWindow : Window
 
     private void LoadLevel(Sed.Core.Model.Level level, string name)
     {
-        _view.SetLevel(level);
+        TextureLookup? textures = null;
+        try { textures = MakeTextureLookup(level); }
+        catch { /* fall back to untextured */ }
+
+        _view.SetLevel(level, textures);
         int surfaces = level.Sectors.Sum(s => s.Surfaces.Count);
+        var tex = textures is null ? "untextured" : "textured";
         _status.Text = $"{name} — {level.Sectors.Count} sectors, {surfaces} surfaces, " +
-                       $"{level.Things.Count} things ({level.Kind})";
+                       $"{level.Things.Count} things ({level.Kind}, {tex})";
     }
 
     private Menu BuildMenu()
@@ -180,6 +227,7 @@ public class MainWindow : Window
     protected override void OnClosed(EventArgs e)
     {
         _gob?.Dispose();
+        _resourceGob?.Dispose();
         base.OnClosed(e);
     }
 }
