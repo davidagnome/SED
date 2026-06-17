@@ -22,6 +22,25 @@ using var gob = GobArchive.Open(gobPath);
 var jkls = gob.FindByExtension(".jkl").OrderBy(e => e.NormalizedName).ToList();
 Console.WriteLine($"Archive: {gob.Entries.Count} entries, {jkls.Count} JKL levels");
 
+var extArg = OptValue(args, "--ext");
+if (extArg is not null)
+{
+    var entries = gob.FindByExtension(extArg).OrderBy(e => e.NormalizedName).ToList();
+    Console.WriteLine($"{entries.Count} *.{extArg.TrimStart('.')} entries:");
+    foreach (var e in entries.Take(40))
+        Console.WriteLine($"  {e.Name,-32} {e.Length,9:n0}");
+    return 0;
+}
+
+if (args.Contains("--types"))
+{
+    foreach (var grp in gob.Entries
+        .GroupBy(e => Path.GetExtension(e.NormalizedName))
+        .OrderByDescending(g => g.Count()))
+        Console.WriteLine($"  {grp.Key,-8} {grp.Count(),5}   {grp.Sum(e => (long)e.Length),12:n0} bytes");
+    return 0;
+}
+
 if (jklName is null)
 {
     foreach (var e in jkls)
