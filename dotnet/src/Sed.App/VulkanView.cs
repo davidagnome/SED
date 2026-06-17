@@ -39,7 +39,6 @@ public sealed class VulkanView : Control
             _ctx = VulkanContext.Create("SED");
             _device = VulkanDevice.Create(_ctx);
             _renderer = new SceneRenderer(_device);
-            _renderer.SetMesh(SceneBuilder.FromLevel(level));
         }
         catch (Exception ex)
         {
@@ -47,6 +46,27 @@ public sealed class VulkanView : Control
         }
 
         ClipToBounds = true;
+        SetLevel(level);
+    }
+
+    /// <summary>Loads a level: rebuilds the mesh, frames the camera to its bounds, and redraws.</summary>
+    public void SetLevel(Level level)
+    {
+        if (_renderer is null) return;
+        _renderer.SetMesh(SceneBuilder.FromLevel(level));
+
+        var box = Box.Empty;
+        foreach (var sector in level.Sectors)
+            foreach (var v in sector.Vertices)
+                box.Encapsulate(v.Position);
+
+        if (box.Max.X >= box.Min.X)
+        {
+            _target = box.Center;
+            double r = (box.Max - _target).Length;
+            _radius = r <= 0 ? 6.0 : r * 2.4;
+        }
+        RenderFrame();
     }
 
     private Vec3 Eye()

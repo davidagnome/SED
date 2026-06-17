@@ -18,7 +18,7 @@ math. See the repo-root analysis for the full option comparison (Lazarus/LCL vs
 | Project | Role | Status |
 |---|---|---|
 | `Sed.Core` | Math (double-precision `Vec2/3`, `ColorF`, `Box`) + domain model (`Level`, `Sector`, `Surface`, `Vertex`, `Thing`, `Light`, `Cog`, `LevelHeader`) | ✅ builds, unit-tested |
-| `Sed.Formats` | JKL/JED readers & writers | 🚧 skeleton |
+| `Sed.Formats` | **JKL reader** (`Jkl/JklParser`) + **GOB archive reader** (`Gob/GobArchive`) | ✅ validated on all 25 retail JK levels |
 | `Sed.Core` | + `Mat4` (column-major, Vulkan-clip perspective/lookat) | ✅ 9 tests |
 | `Sed.Rendering` | `IRenderer`/`Camera` (+ orbit/look-at, view-proj), `Mesh`, `SceneBuilder` (model→mesh), `SampleScene`, `PngWriter` | ✅ |
 | `Sed.Rendering.Vulkan` | Silk.NET backend; MoltenVK locator, logical device, **offscreen triangle** + **3D `SceneRenderer`** (vertex/index buffers, depth, MVP push constant, dynamic viewport) | ✅ verified on M4 Pro |
@@ -81,8 +81,29 @@ Verified: `vkCreateInstance` OK → `Apple M4 Pro [IntegratedGpu] Vulkan 1.2.334
 3. ~~First triangle~~ ✅
 4. ~~Live viewport: resize + depth + MVP; mouse orbit/zoom~~ ✅
 5. ~~Level-geometry pipeline (model→mesh)~~ ✅ (procedural cube; real lighting TBD)
-6. **JKL parser** in `Sed.Formats` → load a real level into the model, then
-   render it instead of the sample cube.
-7. Texture/material loading (CMP/MAT/colormaps) and Gouraud lighting from sector
-   ambient/extra-light + point lights.
+6. ~~JKL parser → load a real level and render it~~ ✅ **Validated against retail
+   `JK1.GOB`**: all 25 levels parse (20–966 sectors, up to 27k tris). The editor's
+   `File ▸ Open` reads a loose `.jkl` or a `.gob` archive and lists its levels in
+   the side panel (`tools/Sed.GobTool` does the same from the CLI).
+   Adjoins/COGs/lights/layers not yet parsed.
+
+### GOB archive format (`Gob/GobArchive`)
+
+Little-endian: magic `"GOB "`, uint32 version (0x14), uint32 directory offset (12);
+at that offset a uint32 entry count then `count` × { uint32 dataOffset, uint32
+length, char[128] name }. Names use `\` separators (e.g. `jkl\01narshadda.jkl`).
+7. Texture/material loading (CMP/MAT/colormaps) and Gouraud lighting from the
+   per-vertex intensities the parser already captures (`Surface.Corner.Intensity`)
+   + sector ambient/extra-light.
 8. Camera WASD/fly navigation, surface/thing picking, then editing + undo.
+
+### JKL format notes (from `src/LEVEL_IO.INC`)
+
+`SECTION: <name>` … `END`; `#` comments; most lines upper-cased (names are not).
+GEORESOURCE builds global tables — `WORLD VERTICES`, `WORLD TEXTURE VERTICES`,
+`WORLD ADJOINS`, `WORLD SURFACES`, then **one normal line per surface (no
+header — consumed by count)**. SECTORS reference the global surface list via
+`SURFACES <base> <count>` and de-dup vertices per sector. Surface line:
+`mat sflags(hex) fflags(hex) geo light tex adjoin extralight nverts v,t … intensities`
+— extralight is 1 float (JK/MotS) or 4 (IJIM); >nverts trailing floats means
+MotS/IJIM per-vertex RGB(A), else JK grayscale.

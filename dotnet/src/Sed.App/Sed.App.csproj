@@ -3,6 +3,7 @@
   <ItemGroup>
     <ProjectReference Include="..\Sed.Rendering.Vulkan\Sed.Rendering.Vulkan.csproj" />
     <ProjectReference Include="..\Sed.Core\Sed.Core.csproj" />
+    <ProjectReference Include="..\Sed.Formats\Sed.Formats.csproj" />
   </ItemGroup>
 
   <ItemGroup>
