@@ -56,6 +56,47 @@ public class EditingTests
     }
 }
 
+public class GeometryEditTests
+{
+    [Fact]
+    public void MoveVertex_RoundTrips()
+    {
+        var v = new Vertex(new Vec3(1, 2, 3));
+        var cmd = new MoveVertexCommand(v, new Vec3(0, 0, 5));
+        cmd.Apply();
+        Assert.Equal(new Vec3(1, 2, 8), v.Position);
+        cmd.Revert();
+        Assert.Equal(new Vec3(1, 2, 3), v.Position);
+    }
+
+    [Fact]
+    public void MoveSurface_MovesAllDistinctVertices_AndReverts()
+    {
+        var level = SampleScene.CreateCube();
+        var surf = level.Sectors[0].Surfaces[0];
+        var before = surf.Corners.Select(c => c.Vertex.Position).ToList();
+
+        var cmd = new MoveSurfaceCommand(surf, new Vec3(10, 0, 0));
+        cmd.Apply();
+        for (int i = 0; i < surf.Corners.Count; i++)
+            Assert.Equal(before[i] + new Vec3(10, 0, 0), surf.Corners[i].Vertex.Position);
+
+        cmd.Revert();
+        for (int i = 0; i < surf.Corners.Count; i++)
+            Assert.Equal(before[i], surf.Corners[i].Vertex.Position);
+    }
+
+    [Fact]
+    public void PickVertex_HitsAimedVertex()
+    {
+        var level = SampleScene.CreateCube(); // vertices at ±1
+        var ray = new Ray(new Vec3(1, 1, 5), new Vec3(0, 0, -1)); // aimed at (1,1,1)
+        var hit = Picker.PickVertex(level, ray, 0.5);
+        Assert.NotNull(hit);
+        Assert.Equal(1.0, hit!.Vertex.Position.Z, 6);
+    }
+}
+
 public class ThingPickTests
 {
     [Fact]

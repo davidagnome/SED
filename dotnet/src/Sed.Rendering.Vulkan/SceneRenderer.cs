@@ -57,6 +57,7 @@ public sealed unsafe class SceneRenderer : IDisposable
     private DescriptorPool _descPool;
     private readonly List<GpuTexture> _sceneTextures = new();
     private readonly List<DrawItem> _draws = new();
+    private readonly Dictionary<string, MatTex> _materialCache = new(StringComparer.OrdinalIgnoreCase);
 
     // Size-dependent targets
     private uint _width, _height;
@@ -105,6 +106,45 @@ public sealed unsafe class SceneRenderer : IDisposable
         DestroyScene();
         if (scene.Mesh.IsEmpty) return;
 
+        UploadGeometry(scene);
+
+        CreateDescriptorPool((uint)scene.Submeshes.Count + 1);
+        _white.Set = AllocateTextureDescriptor(_white.View);
+        _materialCache.Clear();
+
+        foreach (var sub in scene.Submeshes)
+        {
+            if (string.IsNullOrEmpty(sub.Material) || _materialCache.ContainsKey(sub.Material)) continue;
+            var tex = lookup(sub.Material);
+            MatTex mt;
+            if (tex is { } t && t.Rgba.Length == t.Width * t.Height * 4 && t.Width > 0 && t.Height > 0)
+            {
+                var gpu = CreateTextureImage(t.Rgba, (uint)t.Width, (uint)t.Height);
+                gpu.Set = AllocateTextureDescriptor(gpu.View);
+                _sceneTextures.Add(gpu);
+                mt = new MatTex(gpu.Set, 1f / t.Width, 1f / t.Height);
+            }
+            else mt = new MatTex(_white.Set, 1f, 1f);
+            _materialCache[sub.Material] = mt;
+        }
+
+        RebuildDraws(scene);
+    }
+
+    /// <summary>
+    /// Re-uploads scene geometry (e.g. after a vertex edit) while reusing the
+    /// already-loaded material textures — fast enough for interactive editing.
+    /// </summary>
+    public void UpdateGeometry(RenderScene scene)
+    {
+        if (scene.Mesh.IsEmpty) return;
+        DestroyGeometryBuffers();
+        UploadGeometry(scene);
+        RebuildDraws(scene);
+    }
+
+    private void UploadGeometry(RenderScene scene)
+    {
         var verts = scene.Mesh.Vertices.ToArray();
         var indices = scene.Mesh.Indices.ToArray();
         (_vertexBuffer, _vertexMemory) = CreateHostBuffer(
@@ -113,29 +153,15 @@ public sealed unsafe class SceneRenderer : IDisposable
         (_indexBuffer, _indexMemory) = CreateHostBuffer(
             (ulong)(indices.Length * sizeof(uint)), BufferUsageFlags.IndexBufferBit);
         Upload(_indexMemory, MemoryMarshal.AsBytes<uint>(indices));
+    }
 
-        CreateDescriptorPool((uint)scene.Submeshes.Count + 1);
-        _white.Set = AllocateTextureDescriptor(_white.View);
-
-        var materials = new Dictionary<string, MatTex>(StringComparer.OrdinalIgnoreCase);
+    private void RebuildDraws(RenderScene scene)
+    {
+        _draws.Clear();
         foreach (var sub in scene.Submeshes)
         {
-            MatTex mt;
-            if (string.IsNullOrEmpty(sub.Material))
-                mt = new MatTex(_white.Set, 1f, 1f);
-            else if (!materials.TryGetValue(sub.Material, out mt))
-            {
-                var tex = lookup(sub.Material);
-                if (tex is { } t && t.Rgba.Length == t.Width * t.Height * 4 && t.Width > 0 && t.Height > 0)
-                {
-                    var gpu = CreateTextureImage(t.Rgba, (uint)t.Width, (uint)t.Height);
-                    gpu.Set = AllocateTextureDescriptor(gpu.View);
-                    _sceneTextures.Add(gpu);
-                    mt = new MatTex(gpu.Set, 1f / t.Width, 1f / t.Height);
-                }
-                else mt = new MatTex(_white.Set, 1f, 1f);
-                materials[sub.Material] = mt;
-            }
+            var mt = !string.IsNullOrEmpty(sub.Material) && _materialCache.TryGetValue(sub.Material, out var cached)
+                ? cached : new MatTex(_white.Set, 1f, 1f);
             _draws.Add(new DrawItem(mt.Set, (uint)sub.IndexOffset, (uint)sub.IndexCount, mt.InvW, mt.InvH));
         }
     }
@@ -762,17 +788,23 @@ public sealed unsafe class SceneRenderer : IDisposable
         _markerIndexCount = 0;
     }
 
-    private void DestroyScene()
+    private void DestroyGeometryBuffers()
     {
         var d = _dev.Device;
-        foreach (var t in _sceneTextures) DestroyTexture(t);
-        _sceneTextures.Clear();
-        _draws.Clear();
-        DestroyDescriptorPool(); // frees all descriptor sets (incl. white's)
         if (_vertexBuffer.Handle != 0) { _vk.DestroyBuffer(d, _vertexBuffer, null); _vertexBuffer = default; }
         if (_vertexMemory.Handle != 0) { _vk.FreeMemory(d, _vertexMemory, null); _vertexMemory = default; }
         if (_indexBuffer.Handle != 0) { _vk.DestroyBuffer(d, _indexBuffer, null); _indexBuffer = default; }
         if (_indexMemory.Handle != 0) { _vk.FreeMemory(d, _indexMemory, null); _indexMemory = default; }
+    }
+
+    private void DestroyScene()
+    {
+        foreach (var t in _sceneTextures) DestroyTexture(t);
+        _sceneTextures.Clear();
+        _draws.Clear();
+        _materialCache.Clear();
+        DestroyDescriptorPool(); // frees all descriptor sets (incl. white's)
+        DestroyGeometryBuffers();
     }
 
     private void DestroyTargets()

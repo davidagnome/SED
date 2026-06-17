@@ -40,4 +40,12 @@ public sealed class Mesh
         Indices.Add(baseIndex + 1);
         Indices.Add(baseIndex + 2);
     }
+
+    /// <summary>Appends another mesh's geometry, offsetting its indices.</summary>
+    public void Append(Mesh other)
+    {
+        uint baseIndex = (uint)Vertices.Count;
+        Vertices.AddRange(other.Vertices);
+        foreach (var idx in other.Indices) Indices.Add(idx + baseIndex);
+    }
 }

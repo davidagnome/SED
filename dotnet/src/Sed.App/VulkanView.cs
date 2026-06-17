@@ -46,6 +46,11 @@ public sealed class VulkanView : Control
     private double _markerSize = 0.1;
     private Thing? _selectedThing;
     private Surface? _selectedSurface;
+    private Vertex? _selectedVertex;
+    private Sector? _activeSector;        // vertices of this sector are shown for editing
+
+    private TextureLookup? _textures;
+    private Func<string, ThreeDoModel?>? _models;
 
     /// <summary>Undo/redo history for edits made in this viewport.</summary>
     public EditHistory History { get; } = new();
@@ -80,8 +85,12 @@ public sealed class VulkanView : Control
     {
         if (_renderer is null) return;
         _level = level;
+        _textures = textures;
+        _models = models;
         _selectedThing = null;
         _selectedSurface = null;
+        _selectedVertex = null;
+        _activeSector = null;
         _renderer.SetSelection(null);
         History.Clear();
 
@@ -105,19 +114,35 @@ public sealed class VulkanView : Control
         RenderFrame();
     }
 
-    private static readonly ColorF MarkerColor = new(0.2f, 0.9f, 1f);   // cyan things
-    private static readonly ColorF SelectColor = new(1f, 0.9f, 0.2f);   // yellow selection
+    private static readonly ColorF MarkerColor = new(0.2f, 0.9f, 1f);    // cyan things
+    private static readonly ColorF VertexColor = new(1f, 0.5f, 0.1f);    // orange vertices
+    private static readonly ColorF SelectColor = new(1f, 0.9f, 0.2f);    // yellow selection
 
     private void RefreshMarkers()
     {
         if (_renderer is null) return;
-        _renderer.SetMarkers(_markerThings.Count > 0
-            ? SceneBuilder.BuildThingMarkers(_markerThings, _markerSize, MarkerColor)
-            : null);
+        var markers = new Mesh();
+        foreach (var thing in _markerThings)
+            markers.Append(SceneBuilder.BuildMarker(thing.Position, _markerSize, MarkerColor));
+        if (_activeSector is not null)
+            foreach (var v in _activeSector.Vertices)
+                markers.Append(SceneBuilder.BuildMarker(v.Position, _markerSize * 0.7, VertexColor));
+        _renderer.SetMarkers(markers.IsEmpty ? null : markers);
+    }
+
+    /// <summary>Rebuilds the rendered geometry from the (possibly edited) level, reusing textures.</summary>
+    private void RebuildScene()
+    {
+        if (_renderer is null || _level is null || _textures is null) return;
+        var assembler = new SceneAssembler();
+        assembler.AddLevel(_level);
+        if (_models is not null) assembler.AddThings(_level, _models);
+        _renderer.UpdateGeometry(assembler.Build());
     }
 
     private void OnHistoryChanged()
     {
+        RebuildScene();          // geometry edits change the mesh
         RefreshMarkers();
         UpdateSelectionHighlight();
         RenderFrame();
@@ -198,9 +223,11 @@ public sealed class VulkanView : Control
             if (e.Key == Key.Y) { History.Redo(); e.Handled = true; return; }
         }
 
-        if (_selectedThing is not null && TryThingMoveDelta(e.Key, out var delta))
+        if (HasSelection && TryMoveDelta(e.Key, out var delta))
         {
-            History.Do(new MoveThingCommand(_selectedThing, delta));
+            if (_selectedVertex is not null) History.Do(new MoveVertexCommand(_selectedVertex, delta));
+            else if (_selectedSurface is not null) History.Do(new MoveSurfaceCommand(_selectedSurface, delta));
+            else if (_selectedThing is not null) History.Do(new MoveThingCommand(_selectedThing, delta));
             e.Handled = true;
             return;
         }
@@ -213,7 +240,9 @@ public sealed class VulkanView : Control
         }
     }
 
-    private bool TryThingMoveDelta(Key key, out Vec3 delta)
+    private bool HasSelection => _selectedVertex is not null || _selectedSurface is not null || _selectedThing is not null;
+
+    private bool TryMoveDelta(Key key, out Vec3 delta)
     {
         delta = Vec3.Zero;
         double step = System.Math.Max(_markerSize * 2, _moveSpeed);
@@ -309,16 +338,34 @@ public sealed class VulkanView : Control
         double scale = TopLevel.GetTopLevel(this)?.RenderScaling ?? 1.0;
         var ray = Picker.ScreenPointToRay(Cam(), p.X * scale, p.Y * scale, _lastSize.Width, _lastSize.Height);
 
-        var surfaceHit = Picker.Pick(_level, ray);
         var thingHit = Picker.PickThing(_level, ray, _markerSize * 1.8);
+        var vertexHit = Picker.PickVertex(_level, ray, _markerSize);
+        var surfaceHit = Picker.Pick(_level, ray);
 
         _selectedThing = null;
         _selectedSurface = null;
-        if (thingHit is not null && (surfaceHit is null || thingHit.Distance <= surfaceHit.Distance))
-            _selectedThing = thingHit.Thing;
-        else
-            _selectedSurface = surfaceHit?.Surface;
+        _selectedVertex = null;
 
+        double tThing = thingHit?.Distance ?? double.MaxValue;
+        double tVertex = vertexHit?.Distance ?? double.MaxValue;
+        double tSurface = surfaceHit?.Distance ?? double.MaxValue;
+
+        if (thingHit is not null && tThing <= tVertex && tThing <= tSurface)
+        {
+            _selectedThing = thingHit.Thing;
+        }
+        else if (vertexHit is not null && tVertex <= tSurface + 0.05)
+        {
+            _selectedVertex = vertexHit.Vertex;
+            _activeSector = vertexHit.Sector;
+        }
+        else if (surfaceHit is not null)
+        {
+            _selectedSurface = surfaceHit.Surface;
+            _activeSector = surfaceHit.Sector;   // show this sector's vertices for editing
+        }
+
+        RefreshMarkers();
         UpdateSelectionHighlight();
         RenderFrame();
         SelectionChanged?.Invoke(SelectionText());
@@ -327,7 +374,9 @@ public sealed class VulkanView : Control
     private void UpdateSelectionHighlight()
     {
         if (_renderer is null) return;
-        if (_selectedThing is not null)
+        if (_selectedVertex is not null)
+            _renderer.SetSelection(SceneBuilder.BuildMarker(_selectedVertex.Position, _markerSize * 1.1, SelectColor));
+        else if (_selectedThing is not null)
             _renderer.SetSelection(SceneBuilder.BuildMarker(_selectedThing.Position, _markerSize * 1.3, SelectColor));
         else if (_selectedSurface is not null)
             _renderer.SetSelection(BuildSurfaceHighlight(_selectedSurface));
@@ -337,6 +386,8 @@ public sealed class VulkanView : Control
 
     private string SelectionText()
     {
+        if (_selectedVertex is { } v)
+            return $"Vertex @ {v.Position}  — arrows/PgUp-PgDn move, click a face to pick another, Ctrl+Z undo";
         if (_selectedThing is { } t)
         {
             var name = t.Name.Length > 0 ? t.Name : "?";
@@ -345,7 +396,7 @@ public sealed class VulkanView : Control
         if (_selectedSurface is { } s)
         {
             var mat = string.IsNullOrEmpty(s.Material) ? "(no material)" : s.Material;
-            return $"Sector {s.Sector.Num}, surface {s.Num} — {mat}";
+            return $"Sector {s.Sector.Num}, surface {s.Num} — {mat}  (orange dots = vertices; arrows move whole surface)";
         }
         return "Nothing selected";
     }

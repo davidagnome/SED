@@ -12,6 +12,9 @@ public sealed record PickResult(Sector Sector, Surface Surface, double Distance,
 /// <summary>A thing hit by a pick ray (sphere test around the thing's position).</summary>
 public sealed record ThingHit(Thing Thing, double Distance);
 
+/// <summary>A vertex hit by a pick ray, with its owning sector.</summary>
+public sealed record VertexHit(Sector Sector, Vertex Vertex, double Distance);
+
 /// <summary>
 /// Ray casting for viewport selection: builds a pick ray from a screen pixel and
 /// the camera, and finds the nearest surface a ray strikes (Möller–Trumbore over
@@ -74,6 +77,17 @@ public static class Picker
                 best = new ThingHit(thing, t);
             }
         }
+        return best;
+    }
+
+    /// <summary>Finds the nearest sector vertex whose pick sphere (radius) the ray hits, or null.</summary>
+    public static VertexHit? PickVertex(Level level, Ray ray, double radius)
+    {
+        VertexHit? best = null;
+        foreach (var sector in level.Sectors)
+            foreach (var v in sector.Vertices)
+                if (RaySphere(ray, v.Position, radius, out double t) && (best is null || t < best.Distance))
+                    best = new VertexHit(sector, v, t);
         return best;
     }
 

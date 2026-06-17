@@ -17,12 +17,12 @@ math. See the repo-root analysis for the full option comparison (Lazarus/LCL vs
 
 | Project | Role | Status |
 |---|---|---|
-| `Sed.Core` | Math + domain model + **`Editing/` (`EditHistory` undo/redo, `MoveThingCommand`)** | ✅ unit-tested |
+| `Sed.Core` | Math + domain model + **`Editing/`** (`EditHistory`; Move{Thing,Vertex,Surface}Command) | ✅ unit-tested |
 | `Sed.Formats` | **JKL** (`Jkl/`, incl. templates), **GOB** (`Gob/`), **MAT/CMP** (`Material/`), **3DO models** (`ThreeDo/`), **`Game/GameInstall`** | ✅ validated on retail data |
 | `Sed.Core` | + `Mat4` (column-major, Vulkan-clip perspective/lookat) | ✅ 9 tests |
 | `Sed.Rendering` | `Camera`, `Mesh`, **`SceneAssembler`** (level surfaces + instanced 3DO models → material batches), `SceneBuilder`, `Picker`, `PngWriter` | ✅ |
 | `Sed.Rendering.Vulkan` | Silk.NET backend; textured `SceneRenderer` (descriptor-set textures, depth, MVP) + **depth-off selection-highlight overlay** | ✅ verified on M4 Pro |
-| `Sed.App` | Avalonia shell + `VulkanView` (fly camera, click-pick **surfaces & things**, arrow-keys move selected thing, **Edit ▸ Undo/Redo**); Game menu (per-game install dirs) + File ▸ Open | ✅ |
+| `Sed.App` | Avalonia shell + `VulkanView`: fly camera; click-pick **things / vertices / surfaces**; arrow-keys move selection (thing/vertex/whole surface) with **live mesh rebuild** + Edit ▸ Undo/Redo; Game menu + File ▸ Open | ✅ |
 | `tools/Sed.GobTool`, `Sed.JklProbe`, `Sed.MatTool`, `Sed.LevelRender` | GOB list / JKL render / MAT→PNG / **textured level → PNG** | ✅ |
 | `tools/Sed.VulkanSmoke`, `Sed.TriangleProbe`, `Sed.SceneProbe`, `Sed.AppShot` | bring-up + capture probes | ✅ |
 | `tests/Sed.Core.Tests` | xUnit | ✅ 19 passing |
@@ -107,9 +107,12 @@ length, char[128] name }. Names use `\` separators (e.g. `jkl\01narshadda.jkl`).
     →`model3d` resolution (`Level.GetThingModel`); `SceneAssembler.AddThings`
     instances models at thing pos/orientation; model-less things keep markers.
     Verified: standalone table model + Katarn chair in-room.
-    **Next:** geometry editing (move vertices/surfaces) on the `IEditCommand`
-    pattern; thing create/delete; saving back to JKL; real colormap lighting;
-    transparency; sky rendering; rebuild model instances when a thing is moved.
+11. ~~Geometry editing~~ ✅ `MoveVertexCommand`/`MoveSurfaceCommand`,
+    `Picker.PickVertex`, `SceneRenderer.UpdateGeometry` (re-upload geometry,
+    reuse textures). Click a face → its sector's vertices show as orange dots;
+    click a vertex to move it, or move the whole surface; undo/redo.
+    **Next:** thing create/delete, vertex add/split, **saving back to JKL**
+    (round-trip), then sky/transparency/real lighting.
 
 ### MAT / CMP formats (from `src/graph_files.pas`)
 
