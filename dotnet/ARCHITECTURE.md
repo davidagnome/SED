@@ -19,23 +19,32 @@ math. See the repo-root analysis for the full option comparison (Lazarus/LCL vs
 |---|---|---|
 | `Sed.Core` | Math (double-precision `Vec2/3`, `ColorF`, `Box`) + domain model (`Level`, `Sector`, `Surface`, `Vertex`, `Thing`, `Light`, `Cog`, `LevelHeader`) | ✅ builds, unit-tested |
 | `Sed.Formats` | JKL/JED readers & writers | 🚧 skeleton |
-| `Sed.Rendering` | Backend-agnostic `IRenderer`, `Camera` | 🚧 interface only |
-| `Sed.Rendering.Vulkan` | Silk.NET Vulkan backend; MoltenVK locator, logical device, **offscreen triangle pipeline** | ✅ device + render pass + SPIR-V pipeline + draw + readback verified on M4 Pro |
-| `Sed.App` | Avalonia desktop shell (menu, side panel, Vulkan viewport, status bar) | ✅ composed window renders the MoltenVK triangle |
+| `Sed.Core` | + `Mat4` (column-major, Vulkan-clip perspective/lookat) | ✅ 9 tests |
+| `Sed.Rendering` | `IRenderer`/`Camera` (+ orbit/look-at, view-proj), `Mesh`, `SceneBuilder` (model→mesh), `SampleScene`, `PngWriter` | ✅ |
+| `Sed.Rendering.Vulkan` | Silk.NET backend; MoltenVK locator, logical device, **offscreen triangle** + **3D `SceneRenderer`** (vertex/index buffers, depth, MVP push constant, dynamic viewport) | ✅ verified on M4 Pro |
+| `Sed.App` | Avalonia shell + **live `VulkanView`** (resizable, mouse orbit, wheel zoom) | ✅ renders the sample cube in-window |
 | `tools/Sed.VulkanSmoke` | Vulkan instance/GPU bring-up check | ✅ |
-| `tools/Sed.TriangleProbe` | Offscreen render → PNG (dependency-free encoder) | ✅ |
+| `tools/Sed.TriangleProbe` | Offscreen triangle → PNG | ✅ |
+| `tools/Sed.SceneProbe` | 3D cube (model→mesh→MVP→depth) → PNG | ✅ |
 | `tools/Sed.AppShot` | Headless Skia capture of the editor window → PNG | ✅ |
-| `tests/Sed.Core.Tests` | xUnit | ✅ 6 passing |
+| `tests/Sed.Core.Tests` | xUnit | ✅ 9 passing |
 
 ### Rendering pipeline (verified)
 
 `VulkanContext` (instance, portability enumeration) → `VulkanDevice` (physical
-device pick, graphics queue, `VK_KHR_portability_subset`, command pool) →
-`OffscreenRenderer` (RGBA8 color image, render pass, embedded SPIR-V graphics
-pipeline, draw, image→buffer copy, host readback). The editor displays the
-readback via `VulkanViewport.ToBitmap` into an Avalonia `WriteableBitmap`. This
-offscreen-to-bitmap path is intentionally the same mechanism a live, resizable
-viewport will use.
+device pick, graphics queue, `VK_KHR_portability_subset`, command pool) → renderer:
+
+- `OffscreenRenderer` — bring-up triangle (no vertex buffer).
+- `SceneRenderer` — indexed mesh with depth buffer, perspective MVP via push
+  constant, dynamic viewport/scissor (resize without pipeline rebuild),
+  two-sided flat shading. Targets are recreated on size change.
+
+`SceneBuilder.FromLevel` triangulates `Sed.Core.Model` surfaces (fan per surface,
+surface normal for shading) into a `Mesh`. The editor's `VulkanView` owns the
+device + `SceneRenderer`, renders to pixels at the control's pixel size, and
+blits via `VulkanViewport.ToBitmap` into an Avalonia `WriteableBitmap`. This
+offscreen→bitmap path is the same mechanism a future swapchain-backed viewport
+would replace if blit latency ever matters.
 
 Shaders live in `Shaders/*.{vert,frag}`, compiled to `.spv` by an MSBuild target
 (`glslangValidator` when present) and embedded as resources; the checked-in
@@ -70,10 +79,10 @@ Verified: `vkCreateInstance` OK → `Apple M4 Pro [IntegratedGpu] Vulkan 1.2.334
 1. ~~Device + logical device + queue~~ ✅
 2. ~~Avalonia shell hosting Vulkan output~~ ✅
 3. ~~First triangle~~ ✅
-4. **Live viewport**: re-render on resize/camera change (replace the one-shot
-   frame); add depth buffer + MVP uniform; consider a true swapchain via
-   Silk.NET windowing embedded through `NativeControlHost` if blit latency matters.
-5. **Level geometry** pipeline: triangulate `Sed.Core.Model` sectors/surfaces →
-   vertex/index buffers; flat/Gouraud shading from sector lighting.
-6. **JKL parser** in `Sed.Formats` → load a real level into the model.
-7. Camera/navigation, surface picking, then the editing/undo layer.
+4. ~~Live viewport: resize + depth + MVP; mouse orbit/zoom~~ ✅
+5. ~~Level-geometry pipeline (model→mesh)~~ ✅ (procedural cube; real lighting TBD)
+6. **JKL parser** in `Sed.Formats` → load a real level into the model, then
+   render it instead of the sample cube.
+7. Texture/material loading (CMP/MAT/colormaps) and Gouraud lighting from sector
+   ambient/extra-light + point lights.
+8. Camera WASD/fly navigation, surface/thing picking, then editing + undo.

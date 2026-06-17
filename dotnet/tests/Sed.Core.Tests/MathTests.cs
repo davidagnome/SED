@@ -40,6 +40,37 @@ public class MathTests
     }
 }
 
+public class Mat4Tests
+{
+    [Fact]
+    public void Multiply_ByIdentity_IsUnchanged()
+    {
+        var t = Mat4.Translate(new Vec3(2, 3, 4));
+        var r = t * Mat4.Identity;
+        for (int i = 0; i < 16; i++)
+            Assert.Equal(t.M[i], r.M[i], 6);
+    }
+
+    [Fact]
+    public void Translate_StoresInColumnMajorTranslationColumn()
+    {
+        var t = Mat4.Translate(new Vec3(5, 6, 7));
+        Assert.Equal(5f, t.M[12]);
+        Assert.Equal(6f, t.M[13]);
+        Assert.Equal(7f, t.M[14]);
+    }
+
+    [Fact]
+    public void Perspective_PutsNegativeWInClipForwardPoint()
+    {
+        // A right-handed perspective should map a point in front of the camera
+        // (negative Z in view space) to positive clip-space w (= -z).
+        var p = Mat4.Perspective(System.Math.PI / 2, 1.0, 0.1, 100.0);
+        // w row is the third column's .w via M[11] = -1
+        Assert.Equal(-1f, p.M[11]);
+    }
+}
+
 public class ModelTests
 {
     [Fact]

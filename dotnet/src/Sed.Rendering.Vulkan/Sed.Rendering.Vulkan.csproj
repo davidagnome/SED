@@ -16,11 +16,11 @@
       <Glslang Condition="Exists('/opt/homebrew/bin/glslangValidator')">/opt/homebrew/bin/glslangValidator</Glslang>
       <Glslang Condition="'$(Glslang)'=='' And Exists('/usr/local/bin/glslangValidator')">/usr/local/bin/glslangValidator</Glslang>
     </PropertyGroup>
+    <ItemGroup>
+      <ShaderSource Include="Shaders/*.vert;Shaders/*.frag" />
+    </ItemGroup>
     <Exec Condition="'$(Glslang)'!=''"
-          Command="&quot;$(Glslang)&quot; -V Shaders/triangle.vert -o Shaders/triangle.vert.spv"
-          WorkingDirectory="$(MSBuildProjectDirectory)" />
-    <Exec Condition="'$(Glslang)'!=''"
-          Command="&quot;$(Glslang)&quot; -V Shaders/triangle.frag -o Shaders/triangle.frag.spv"
+          Command="&quot;$(Glslang)&quot; -V %(ShaderSource.Identity) -o %(ShaderSource.Identity).spv"
           WorkingDirectory="$(MSBuildProjectDirectory)" />
   </Target>
 

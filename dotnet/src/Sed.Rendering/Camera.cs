@@ -18,7 +18,31 @@ public sealed class Camera
         {
             double cy = System.Math.Cos(Yaw), sy = System.Math.Sin(Yaw);
             double cp = System.Math.Cos(Pitch), sp = System.Math.Sin(Pitch);
-            return new Vec3(sy * cp, cp * cy, sp).Normalized();
+            return new Vec3(sy * cp, cy * cp, sp).Normalized();
         }
+    }
+
+    /// <summary>World up. The Sith engine is Z-up (sector floors face +Z).</summary>
+    public static Vec3 Up => new(0, 0, 1);
+
+    /// <summary>Creates a camera positioned at <paramref name="eye"/> aimed at <paramref name="target"/>.</summary>
+    public static Camera LookingAt(Vec3 eye, Vec3 target, double fovDegrees = 60.0)
+    {
+        var dir = (target - eye).Normalized();
+        return new Camera
+        {
+            Position = eye,
+            Pitch = System.Math.Asin(System.Math.Clamp(dir.Z, -1, 1)),
+            Yaw = System.Math.Atan2(dir.X, dir.Y),
+            FieldOfViewDegrees = fovDegrees,
+        };
+    }
+
+    /// <summary>Builds the combined projection * view matrix for the given aspect ratio.</summary>
+    public Mat4 ViewProjection(double aspect)
+    {
+        var view = Mat4.LookAt(Position, Position + Forward, Up);
+        var proj = Mat4.Perspective(FieldOfViewDegrees * System.Math.PI / 180.0, aspect, NearPlane, FarPlane);
+        return proj * view;
     }
 }

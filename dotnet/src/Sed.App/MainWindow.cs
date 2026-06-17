@@ -63,36 +63,9 @@ public class MainWindow : Window
 
     private static Control BuildViewport(TextBlock status)
     {
-        var host = new Border
-        {
-            Background = new SolidColorBrush(Color.FromRgb(0x0d, 0x0d, 0x14)),
-        };
-
-        try
-        {
-            WriteableBitmap frame = VulkanViewport.RenderTriangle(800, 600);
-            host.Child = new Image
-            {
-                Source = frame,
-                Stretch = Stretch.Uniform,
-                HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Center,
-            };
-            status.Text = "Vulkan viewport: rendered first frame (MoltenVK)";
-        }
-        catch (Exception ex)
-        {
-            host.Child = new TextBlock
-            {
-                Margin = new Thickness(20),
-                TextWrapping = TextWrapping.Wrap,
-                Foreground = Brushes.OrangeRed,
-                Text = $"Vulkan init failed:\n{ex.Message}",
-            };
-            status.Text = "Vulkan unavailable";
-        }
-
-        return host;
+        var level = Sed.Rendering.SampleScene.CreateCube();
+        status.Text = "Vulkan viewport (MoltenVK) — drag to orbit, wheel to zoom";
+        return new VulkanView(level);
     }
 
     private static Menu BuildMenu()
