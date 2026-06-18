@@ -17,8 +17,8 @@ math. See the repo-root analysis for the full option comparison (Lazarus/LCL vs
 
 | Project | Role | Status |
 |---|---|---|
-| `Sed.Core` | Math + domain model + **`Editing/`** (`EditHistory`; Move{Thing,Vertex,Surface}Command) | ✅ unit-tested |
-| `Sed.Formats` | **JKL** read (`JklParser`) + **patch-save** (`JklDocument`/`JklWriter`), **GOB**, **MAT/CMP**, **3DO models**, templates, **`Game/GameInstall`** | ✅ validated on retail data |
+| `Sed.Core` | Math + domain model + **`Editing/`** (`EditHistory`; Move/Create/Delete Thing, Move/Delete/Insert Vertex, Move Surface) | ✅ unit-tested |
+| `Sed.Formats` | **JKL** read + **faithful save** (`JklWriter`/`GeoResourceWriter` regenerate GEORESOURCE/SECTORS/THINGS incl. adjoin mirror-pairs), **GOB**, **MAT/CMP** (palette+light table), **3DO**, templates, **`Game/GameInstall`** | ✅ validated on retail data |
 | `Sed.Core` | + `Mat4` (column-major, Vulkan-clip perspective/lookat) | ✅ 9 tests |
 | `Sed.Rendering` | `Camera`, `Mesh`, **`SceneAssembler`** (level surfaces + instanced 3DO models → material batches), `SceneBuilder`, `Picker`, `PngWriter` | ✅ |
 | `Sed.Rendering.Vulkan` | Silk.NET backend; **indexed-texture `SceneRenderer`** — CMP palette + 64-level light ramp shading in-shader, opaque/translucent/flat passes, depth, MVP, selection/marker overlays | ✅ verified on M4 Pro |
@@ -121,8 +121,24 @@ length, char[128] name }. Names use `\` separators (e.g. `jkl\01narshadda.jkl`).
     palette — matches engine lighting (lit lamps glow, walls dark). Sky surfaces
     (`SF_SkyHorizon/Ceiling`) drawn full-bright; translucent surfaces
     (`FF_Transluent`) alpha-blended in a 2nd pass with index-0 cutout.
-    **Next:** thing create/delete, vertex add/split; scrolling sky projection;
-    editor brightness control; per-edit scene-reassemble optimization.
+14. ~~Editor brightness toggle~~ ✅ shader `brightness` push constant (lerps light
+    toward full bright); `View ▸ Cycle Brightness` / **B** key (real→medium→full).
+15. ~~Thing / vertex create-delete~~ ✅ Insert = create thing (or split selected
+    surface's edge); Delete = remove selected thing/vertex; undoable. The THINGS
+    section is now **regenerated** on save so add/delete persists (verified on
+    retail levels). Vertex topology changes render but don't yet save to JKL.
+16. ~~Faithful topology save~~ ✅ `GeoResourceWriter` regenerates GEORESOURCE
+    (pooled/deduped vertices + texvertices, adjoin mirror-pairs, full surface
+    records) and SECTORS from the model; `JklWriter` splices GEORESOURCE/SECTORS/
+    THINGS, keeps the rest verbatim. Verified on retail levels (07yun: 50 adjoins,
+    katarn: 1660) — all geometry counts + edits round-trip.
+17. ~~Sector create/delete~~ ✅ `SectorFactory.CreateBox` + Create/DeleteSectorCommand;
+    **N** = new box room, Edit ▸ Delete Sector. Box persists through save.
+18. ~~View-projected scrolling sky~~ ✅ ceiling sky = ray-to-plane → world-XY UV;
+    horizon sky = view-direction cylindrical (scrolls with rotation); computed in
+    the fragment shader (camPos + sky params in push constant), full-bright.
+    **Next:** more edit ops (rotate/scale, split surface), texture/material editing,
+    cog/template editing, exact horizon screen-projection.
 
 ### MAT / CMP formats (from `src/graph_files.pas`)
 

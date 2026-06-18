@@ -48,6 +48,7 @@ using var ctx = VulkanContext.Create("SED Interior");
 using var device = VulkanDevice.Create(ctx);
 using var renderer = new SceneRenderer(device);
 renderer.SetColormap(palette.PaletteRgb, palette.LightTable);
+renderer.SetSky(level.Header.CeilingSky.Height, (float)level.Header.CeilingSky.Offset.X, (float)level.Header.CeilingSky.Offset.Y);
 renderer.SetScene(scene, Lookup);
 
 // Look at the anchor thing from a few offset distances so nearby models are framed.
@@ -58,7 +59,7 @@ for (int i = 0; i < dists.Length; i++)
     var eye = anchor.Position + new Vec3(d * 0.8, -d, d * 0.6);
     var cam = Camera.LookingAt(eye, anchor.Position, 75);
     cam.NearPlane = 0.01; cam.FarPlane = 200;
-    var pixels = renderer.Render(cam.ViewProjection((double)W / H), W, H);
+    var pixels = renderer.Render(cam.ViewProjection((double)W / H), cam.Position, W, H);
     var outPath = $"/tmp/interior_{levelName}_d{i}.png";
     PngWriter.Write(outPath, pixels, (int)W, (int)H);
     Console.WriteLine($"  dist {d} → {outPath}");

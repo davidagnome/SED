@@ -97,6 +97,7 @@ public sealed class VulkanView : Control
 
         if (paletteRgb is not null && lightTable is not null)
             _renderer.SetColormap(paletteRgb, lightTable);
+        _renderer.SetSky(level.Header.CeilingSky.Height, (float)level.Header.CeilingSky.Offset.X, (float)level.Header.CeilingSky.Offset.Y);
 
         if (textures is not null)
         {
@@ -140,7 +141,7 @@ public sealed class VulkanView : Control
         if (_renderer is null || _level is null || _textures is null) return;
         var assembler = new SceneAssembler();
         assembler.AddLevel(_level);
-        if (_models is not null) assembler.AddThings(_level, _models);
+        _markerThings = _models is not null ? assembler.AddThings(_level, _models) : _level.Things.ToList();
         _renderer.UpdateGeometry(assembler.Build());
     }
 
@@ -183,7 +184,7 @@ public sealed class VulkanView : Control
         if (_renderer is null || _lastSize.Width < 1 || _lastSize.Height < 1) return;
         uint w = (uint)_lastSize.Width, h = (uint)_lastSize.Height;
         var mvp = Cam().ViewProjection((double)w / h);
-        var pixels = _renderer.Render(mvp, w, h);
+        var pixels = _renderer.Render(mvp, _camPos, w, h);
         _bitmap = VulkanViewport.ToBitmap(pixels, (int)w, (int)h);
         InvalidateVisual();
     }
@@ -227,6 +228,18 @@ public sealed class VulkanView : Control
             if (e.Key == Key.Y) { History.Redo(); e.Handled = true; return; }
         }
 
+        if (e.Key == Key.B) { CycleBrightness(); e.Handled = true; return; }
+
+        if (e.Key == Key.Insert)
+        {
+            if (_selectedSurface is not null) History.Do(new InsertSurfaceVertexCommand(_selectedSurface, 0));
+            else CreateThing();
+            e.Handled = true;
+            return;
+        }
+        if (e.Key == Key.Delete) { DeleteSelected(); e.Handled = true; return; }
+        if (e.Key == Key.N) { CreateSector(); e.Handled = true; return; }
+
         if (HasSelection && TryMoveDelta(e.Key, out var delta))
         {
             if (_selectedVertex is not null) History.Do(new MoveVertexCommand(_selectedVertex, delta));
@@ -241,6 +254,83 @@ public sealed class VulkanView : Control
             _pressed.Add(e.Key);
             if (!_moveTimer.IsEnabled) _moveTimer.Start();
             e.Handled = true;
+        }
+    }
+
+    private float _brightness;
+
+    /// <summary>Cycles editor brightness: real → medium → full → real.</summary>
+    public void CycleBrightness()
+    {
+        _brightness = _brightness < 0.25f ? 0.6f : _brightness < 0.85f ? 1f : 0f;
+        _renderer?.SetBrightness(_brightness);
+        RenderFrame();
+        var label = _brightness == 0 ? "real lighting" : _brightness >= 1f ? "full bright" : "medium";
+        SelectionChanged?.Invoke($"Brightness: {label} (press B to cycle)");
+    }
+
+    private void CreateThing()
+    {
+        if (_level is null || _renderer is null) return;
+        Thing t;
+        if (_selectedThing is { } sel)
+        {
+            t = new Thing
+            {
+                Template = sel.Template, Name = sel.Name, Sector = sel.Sector,
+                Position = sel.Position + new Vec3(_moveSpeed * 4, 0, 0),
+                Pitch = sel.Pitch, Yaw = sel.Yaw, Roll = sel.Roll,
+            };
+            foreach (var (k, v) in sel.Values) t.Values[k] = v;
+        }
+        else
+        {
+            t = new Thing
+            {
+                Template = string.Empty, Name = "newthing",
+                Position = _camPos + Cam().Forward * (_moveSpeed * 15),
+                Sector = _activeSector ?? _level.Sectors.FirstOrDefault(),
+            };
+        }
+        _selectedThing = t; _selectedSurface = null; _selectedVertex = null;
+        History.Do(new CreateThingCommand(_level, t));
+    }
+
+    /// <summary>Creates a default box-room sector in front of the camera.</summary>
+    public void CreateSector()
+    {
+        if (_level is null || _renderer is null) return;
+        var sample = _level.Sectors.SelectMany(s => s.Surfaces).FirstOrDefault(s => !string.IsNullOrEmpty(s.Material));
+        var center = _camPos + Cam().Forward * (_moveSpeed * 15);
+        double size = System.Math.Max(0.5, _moveSpeed * 8);
+        var sector = SectorFactory.CreateBox(_level, center, size, sample?.Material ?? string.Empty, sample?.MaterialIndex ?? 0);
+        _selectedSurface = null; _selectedVertex = null; _selectedThing = null;
+        _activeSector = sector;
+        History.Do(new CreateSectorCommand(_level, sector));
+    }
+
+    /// <summary>Deletes the sector of the current selection (surface/vertex) or the active sector.</summary>
+    public void DeleteSector()
+    {
+        if (_level is null) return;
+        var sec = _selectedSurface?.Sector ?? _activeSector;
+        if (sec is null) { SelectionChanged?.Invoke("Select a surface first, then Delete Sector"); return; }
+        _selectedSurface = null; _selectedVertex = null; _activeSector = null;
+        History.Do(new DeleteSectorCommand(_level, sec));
+    }
+
+    private void DeleteSelected()
+    {
+        if (_level is null) return;
+        if (_selectedVertex is { } v && _activeSector is { } sec)
+        {
+            _selectedVertex = null;
+            History.Do(new DeleteVertexCommand(sec, v));
+        }
+        else if (_selectedThing is { } t)
+        {
+            _selectedThing = null;
+            History.Do(new DeleteThingCommand(_level, t));
         }
     }
 

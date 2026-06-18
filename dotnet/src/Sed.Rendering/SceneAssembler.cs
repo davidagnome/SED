@@ -15,12 +15,12 @@ public sealed class SceneAssembler
     /// <summary>Constant light for 3DO model surfaces (they aren't sector-lit here).</summary>
     private const float ModelLight = 0.8f;
 
-    private readonly record struct Batch(string Material, bool Translucent);
+    private readonly record struct Batch(string Material, bool Translucent, int SkyMode);
     private readonly Dictionary<Batch, Mesh> _byBatch = new();
 
-    private Mesh For(string material, bool translucent)
+    private Mesh For(string material, bool translucent, int skyMode = 0)
     {
-        var key = new Batch(material, translucent);
+        var key = new Batch(material, translucent, skyMode);
         if (!_byBatch.TryGetValue(key, out var mesh))
             _byBatch[key] = mesh = new Mesh();
         return mesh;
@@ -35,7 +35,9 @@ public sealed class SceneAssembler
             if (surface.Corners.Count < 3 || string.IsNullOrEmpty(surface.Material)) continue;
             surface.RecalcNormal();
             var n = surface.Normal;
-            var mesh = For(surface.Material, surface.IsTranslucent);
+            int skyMode = (surface.SurfFlags & Surface.SfSkyCeiling) != 0 ? 1
+                        : (surface.SurfFlags & Surface.SfSkyHorizon) != 0 ? 2 : 0;
+            var mesh = For(surface.Material, surface.IsTranslucent, skyMode);
             float sky = surface.IsSky ? 1f : -1f; // -1 => use per-vertex intensity
             var c0 = surface.Corners[0];
             for (int i = 1; i + 1 < surface.Corners.Count; i++)
@@ -145,6 +147,7 @@ public sealed class SceneAssembler
                 IndexOffset = indexOffset,
                 IndexCount = mesh.Indices.Count,
                 Translucent = batch.Translucent,
+                SkyMode = batch.SkyMode,
             });
         }
         return scene;

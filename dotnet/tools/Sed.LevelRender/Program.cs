@@ -53,10 +53,11 @@ using var ctx = VulkanContext.Create("SED LevelRender");
 using var device = VulkanDevice.Create(ctx);
 using var renderer = new SceneRenderer(device);
 renderer.SetColormap(palette.PaletteRgb, palette.LightTable);
+renderer.SetSky(level.Header.CeilingSky.Height, (float)level.Header.CeilingSky.Offset.X, (float)level.Header.CeilingSky.Offset.Y);
 renderer.SetScene(scene, Lookup);
 Console.WriteLine($"  submeshes={scene.Submeshes.Count}, materials resolved {withTex}/{total}");
 
-var pixels = renderer.Render(mvp, W, H);
+var pixels = renderer.Render(mvp, camera.Position, W, H);
 PngWriter.Write(outPath, pixels, (int)W, (int)H);
 Console.WriteLine($"Rendered → {Path.GetFullPath(outPath)}");
 return 0;

@@ -75,7 +75,7 @@ using var ctx = VulkanContext.Create("SED GobTool");
 using var device = VulkanDevice.Create(ctx);
 using var renderer = new SceneRenderer(device);
 renderer.SetMesh(mesh);
-var pixels = renderer.Render(mvp, W, H);
+var pixels = renderer.Render(mvp, camera.Position, W, H);
 PngWriter.Write(pngPath, pixels, (int)W, (int)H);
 Console.WriteLine($"Rendered → {Path.GetFullPath(pngPath)}");
 return 0;

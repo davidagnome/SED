@@ -22,5 +22,11 @@ public sealed class JklDocument
     /// <summary>Thing number (model order) → 0-based source line.</summary>
     public Dictionary<int, int> ThingLine { get; } = new();
 
+    /// <summary>0-based source line of the "World things N" count line (-1 if no THINGS section).</summary>
+    public int ThingsCountLine { get; set; } = -1;
+
+    /// <summary>Original material names (index order) for resolving surface material indices on save.</summary>
+    public List<string> Materials { get; } = new();
+
     public JklDocument(string[] sourceLines) => SourceLines = sourceLines;
 }

@@ -17,6 +17,8 @@ public sealed class Submesh
     public int IndexCount { get; init; }
     /// <summary>Drawn in a separate alpha-blended pass after opaque geometry.</summary>
     public bool Translucent { get; init; }
+    /// <summary>0 = normal, 1 = ceiling sky, 2 = horizon sky (UV computed in shader).</summary>
+    public int SkyMode { get; init; }
 }
 
 /// <summary>

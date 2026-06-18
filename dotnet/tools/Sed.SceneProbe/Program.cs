@@ -37,7 +37,7 @@ if (hit is not null)
     renderer.SetSelection(sel);
 }
 
-var pixels = renderer.Render(mvp, Width, Height);
+var pixels = renderer.Render(mvp, camera.Position, Width, Height);
 
 PngWriter.Write(outPath, pixels, (int)Width, (int)Height);
 

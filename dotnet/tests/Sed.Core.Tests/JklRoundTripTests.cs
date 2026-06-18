@@ -72,6 +72,84 @@ public class JklRoundTripTests
     }
 
     [Fact]
+    public void AddedThing_PersistsThroughSave()
+    {
+        var doc = JklParser.ParseDocument(Jkl);
+        Assert.Single(doc.Level.Things);
+
+        var extra = new Sed.Core.Model.Thing
+        {
+            Template = "2x8catwalk", Name = "extra", Position = new Vec3(1, 2, 3),
+            Sector = doc.Level.Sectors[0],
+        };
+        doc.Level.Things.Add(extra);
+        doc.Level.RenumberThings();
+
+        var reloaded = JklParser.Parse(JklWriter.Build(doc));
+        Assert.Equal(2, reloaded.Things.Count);
+        Assert.Contains(reloaded.Things, t => t.Name == "extra");
+        Assert.Contains(reloaded.Things, t => t.Name == "Player"); // original preserved
+    }
+
+    [Fact]
+    public void DeletedThing_PersistsThroughSave()
+    {
+        var doc = JklParser.ParseDocument(Jkl);
+        doc.Level.Things.Clear();
+        doc.Level.RenumberThings();
+        var reloaded = JklParser.Parse(JklWriter.Build(doc));
+        Assert.Empty(reloaded.Things);
+        Assert.Contains("special.cog", JklWriter.Build(doc)); // other sections intact
+    }
+
+    [Fact]
+    public void Geometry_RoundTrips_ThroughRegeneration()
+    {
+        var doc = JklParser.ParseDocument(Jkl);
+        var before = (doc.Level.Sectors.Count,
+            doc.Level.Sectors.Sum(s => s.Surfaces.Count),
+            doc.Level.Sectors.Sum(s => s.Vertices.Count),
+            doc.Level.Sectors.Sum(s => s.Surfaces.Sum(f => f.Corners.Count)));
+
+        var reloaded = JklParser.Parse(JklWriter.Build(doc));
+        var after = (reloaded.Sectors.Count,
+            reloaded.Sectors.Sum(s => s.Surfaces.Count),
+            reloaded.Sectors.Sum(s => s.Vertices.Count),
+            reloaded.Sectors.Sum(s => s.Surfaces.Sum(f => f.Corners.Count)));
+
+        Assert.Equal(before, after);
+        // Surface material + flags preserved.
+        Assert.Equal(doc.Level.Sectors[0].Surfaces[0].Material, reloaded.Sectors[0].Surfaces[0].Material);
+    }
+
+    [Fact]
+    public void CreatedSector_PersistsThroughSave()
+    {
+        var doc = JklParser.ParseDocument(Jkl);
+        int sectors0 = doc.Level.Sectors.Count;
+        var box = Sed.Core.Model.SectorFactory.CreateBox(doc.Level, new Vec3(10, 10, 10), 1.0, "dflt.mat", 0);
+        doc.Level.Sectors.Add(box);
+        doc.Level.RenumberSectors();
+
+        var reloaded = JklParser.Parse(JklWriter.Build(doc));
+        Assert.Equal(sectors0 + 1, reloaded.Sectors.Count);
+        Assert.Equal(6, reloaded.Sectors[^1].Surfaces.Count);
+        Assert.Equal(8, reloaded.Sectors[^1].Vertices.Count);
+    }
+
+    [Fact]
+    public void DeletedVertex_PersistsThroughSave()
+    {
+        var doc = JklParser.ParseDocument(Jkl);
+        int verts0 = doc.Level.Sectors[0].Vertices.Count;
+        var v = doc.Level.Sectors[0].Vertices[0];
+        new Sed.Core.Editing.DeleteVertexCommand(doc.Level.Sectors[0], v).Apply();
+
+        var reloaded = JklParser.Parse(JklWriter.Build(doc));
+        Assert.Equal(verts0 - 1, reloaded.Sectors[0].Vertices.Count);
+    }
+
+    [Fact]
     public void UneditedSave_IsContentEquivalent()
     {
         var doc = JklParser.ParseDocument(Jkl);

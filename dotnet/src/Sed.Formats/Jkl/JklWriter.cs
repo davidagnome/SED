@@ -1,14 +1,12 @@
 using System.Globalization;
-using System.Text;
-using Sed.Core.Math;
 using Sed.Core.Model;
 
 namespace Sed.Formats.Jkl;
 
 /// <summary>
-/// Writes an edited <see cref="JklDocument"/> back to disk by patching only the
-/// changed lines (moved world vertices and things) in the original source,
-/// leaving every other section byte-for-byte intact.
+/// Writes an edited <see cref="JklDocument"/> back to disk. The GEORESOURCE,
+/// SECTORS, and THINGS sections are regenerated from the model (so geometry and
+/// thing topology edits persist); every other section is kept verbatim.
 /// </summary>
 public static class JklWriter
 {
@@ -17,59 +15,91 @@ public static class JklWriter
 
     public static string Build(JklDocument doc)
     {
-        var lines = (string[])doc.SourceLines.Clone();
-        var level = doc.Level;
+        var src = doc.SourceLines;
+        var (geo, sectors) = GeoResourceWriter.Build(doc.Level);
 
-        // World vertices: rewrite only the lines whose vertex actually moved.
-        // (JK shares world vertices across sectors, so unmoved copies must not
-        // overwrite a moved one — compare against the originally-parsed position.)
-        foreach (var sector in level.Sectors)
-            foreach (var v in sector.Vertices)
+        var ranges = new List<(int start, int end, List<string> replacement)>();
+        AddSection(ranges, src, "GEORESOURCE", geo);
+        AddSection(ranges, src, "SECTORS", sectors);
+        AddSection(ranges, src, "THINGS", GenerateThings(doc.Level));
+        ranges.Sort((a, b) => a.start.CompareTo(b.start));
+
+        var result = new List<string>(src.Length + 64);
+        int i = 0, r = 0;
+        while (i < src.Length)
+        {
+            if (r < ranges.Count && i == ranges[r].start)
             {
-                if (v.SourceIndex < 0) continue;
-                if (!doc.VertexOriginal.TryGetValue(v.SourceIndex, out var orig)) continue;
-                if (v.Position.DistanceSquaredTo(orig) < 1e-12) continue; // unmoved
-                if (doc.VertexLine.TryGetValue(v.SourceIndex, out int ln) && ln < lines.Length)
-                    lines[ln] = PatchVertexLine(lines[ln], v.Position);
+                result.AddRange(ranges[r].replacement);
+                i = ranges[r].end + 1;
+                r++;
+                continue;
             }
-
-        // Things: rewrite position + orientation, preserving template/name/sector/params.
-        foreach (var thing in level.Things)
-            if (doc.ThingLine.TryGetValue(thing.Num, out int ln) && ln < lines.Length)
-                lines[ln] = PatchThingLine(lines[ln], thing);
-
-        return string.Join('\n', lines);
+            result.Add(src[i]);
+            i++;
+        }
+        return string.Join('\n', result);
     }
 
-    private static string PatchVertexLine(string original, Vec3 pos)
+    private static void AddSection(List<(int, int, List<string>)> ranges, string[] lines, string name, List<string> replacement)
     {
-        // "  12:\t x y z [# comment]"  ->  keep the "12:" prefix, replace coords.
-        int colon = original.IndexOf(':');
-        string prefix = colon >= 0 ? original[..(colon + 1)] : "0:";
-        return $"{prefix}\t{F(pos.X)} {F(pos.Y)} {F(pos.Z)}";
+        var (start, end) = FindSection(lines, name);
+        if (start >= 0) ranges.Add((start, end, replacement));
     }
 
-    private static string PatchThingLine(string original, Thing thing)
+    /// <summary>
+    /// Finds a "SECTION: name" line and the line that closes it: the section's own
+    /// "END" (inclusive) or the line before the next "SECTION:" (exclusive) — JK
+    /// sections don't all use an explicit END.
+    /// </summary>
+    private static (int start, int end) FindSection(string[] lines, string name)
     {
-        int hash = original.IndexOf('#');
-        var body = hash >= 0 ? original[..hash] : original;
-        var t = body.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
-        if (t.Length < 10) return original; // not a thing line we can patch
+        int start = -1;
+        for (int i = 0; i < lines.Length; i++)
+        {
+            var t = lines[i].Trim();
+            if (start < 0)
+            {
+                if (IsSectionHeader(t, out var hdr) && hdr.Equals(name, StringComparison.OrdinalIgnoreCase))
+                    start = i;
+            }
+            else if (t.Equals("END", StringComparison.OrdinalIgnoreCase))
+            {
+                return (start, i);            // explicit END (inclusive)
+            }
+            else if (IsSectionHeader(t, out _))
+            {
+                return (start, i - 1);        // next section begins (exclusive)
+            }
+        }
+        return (start, start >= 0 ? lines.Length - 1 : -1);
+    }
 
-        var sb = new StringBuilder();
-        sb.Append(t[0]).Append(' ')          // index "i:"
-          .Append(t[1]).Append(' ')          // template
-          .Append(t[2]).Append(' ')          // name
-          .Append(F(thing.Position.X)).Append(' ')
-          .Append(F(thing.Position.Y)).Append(' ')
-          .Append(F(thing.Position.Z)).Append(' ')
-          .Append(F(thing.Pitch)).Append(' ')
-          .Append(F(thing.Yaw)).Append(' ')
-          .Append(F(thing.Roll)).Append(' ')
-          .Append(t[9]);                       // sector
-        for (int i = 10; i < t.Length; i++)   // remaining params verbatim
-            sb.Append(' ').Append(t[i]);
-        return sb.ToString();
+    private static bool IsSectionHeader(string trimmed, out string name)
+    {
+        name = string.Empty;
+        if (!trimmed.StartsWith("SECTION:", StringComparison.OrdinalIgnoreCase)) return false;
+        name = trimmed[8..].Trim();
+        return true;
+    }
+
+    private static List<string> GenerateThings(Level level)
+    {
+        var lines = new List<string> { "SECTION: THINGS", "", $"World things {level.Things.Count}" };
+        for (int i = 0; i < level.Things.Count; i++)
+        {
+            var t = level.Things[i];
+            var template = t.Template.Length > 0 ? t.Template : "none";
+            var name = t.Name.Length > 0 ? t.Name : "thing";
+            int sector = t.Sector?.Num ?? 0;
+            var line = $"{i}: {template} {name} {F(t.Position.X)} {F(t.Position.Y)} {F(t.Position.Z)} " +
+                       $"{F(t.Pitch)} {F(t.Yaw)} {F(t.Roll)} {sector}";
+            foreach (var (k, v) in t.Values) line += $" {k}={v}";
+            lines.Add(line);
+        }
+        lines.Add("end");
+        lines.Add("");
+        return lines;
     }
 
     private static string F(double v) => v.ToString("0.000000", CultureInfo.InvariantCulture);

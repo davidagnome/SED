@@ -13,6 +13,10 @@ internal sealed class GeoData
     public List<Vec3> Vertices { get; } = new();
     public List<Vec2> TexVertices { get; } = new();
     public List<TempSurface> Surfaces { get; } = new();
+    public List<TempAdjoin> Adjoins { get; } = new();
+
+    /// <summary>Global surface index → built model surface (for resolving adjoins).</summary>
+    public Dictionary<int, Sed.Core.Model.Surface> SurfaceByGlobalIndex { get; } = new();
 
     public string GetMaterial(int index) =>
         (uint)index < (uint)Materials.Count ? Materials[index] : string.Empty;
@@ -29,4 +33,13 @@ internal sealed class TempSurface
     public List<int> Vxs { get; } = new();
     public List<int> Tvxs { get; } = new();
     public List<ColorF> Intensities { get; } = new();
+}
+
+/// <summary>A parsed WORLD ADJOINS record: flags, the mirror (paired) record index,
+/// and the global surface index that owns it (set while parsing surfaces).</summary>
+internal sealed class TempAdjoin
+{
+    public long Flags;
+    public int Mirror = -1;
+    public int Surf = -1;
 }

@@ -36,7 +36,7 @@ renderer.SetColormap(palRgb, ramp);
 var assembler = new SceneAssembler();
 assembler.AddLevel(level);
 renderer.SetScene(assembler.Build(), Lookup);
-PngWriter.Write("/tmp/edit_before.png", renderer.Render(mvp, W, H), (int)W, (int)H);
+PngWriter.Write("/tmp/edit_before.png", renderer.Render(mvp, camera.Position, W, H), (int)W, (int)H);
 Console.WriteLine("before → /tmp/edit_before.png");
 
 // Pull the top-most vertex further up (and out) — deform the cube.
@@ -47,6 +47,6 @@ v.Position += new Vec3(0.8, 0.8, 2.0);
 var rebuilt = new SceneAssembler();
 rebuilt.AddLevel(level);
 renderer.UpdateGeometry(rebuilt.Build());   // reuses the texture, re-uploads geometry
-PngWriter.Write("/tmp/edit_after.png", renderer.Render(mvp, W, H), (int)W, (int)H);
+PngWriter.Write("/tmp/edit_after.png", renderer.Render(mvp, camera.Position, W, H), (int)W, (int)H);
 Console.WriteLine("after  → /tmp/edit_after.png");
 return 0;

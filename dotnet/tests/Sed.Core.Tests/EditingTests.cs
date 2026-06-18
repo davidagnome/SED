@@ -97,6 +97,105 @@ public class GeometryEditTests
     }
 }
 
+public class CreateDeleteTests
+{
+    [Fact]
+    public void CreateThing_Undo_Redo()
+    {
+        var level = new Level();
+        var history = new EditHistory();
+        var t = new Thing { Name = "x" };
+        history.Do(new CreateThingCommand(level, t));
+        Assert.Single(level.Things);
+        history.Undo();
+        Assert.Empty(level.Things);
+        history.Redo();
+        Assert.Single(level.Things);
+    }
+
+    [Fact]
+    public void DeleteThing_RestoresAtSameIndex()
+    {
+        var level = new Level();
+        var a = level.NewThing(); var b = level.NewThing(); var c = level.NewThing();
+        var history = new EditHistory();
+        history.Do(new DeleteThingCommand(level, b));
+        Assert.Equal(2, level.Things.Count);
+        Assert.DoesNotContain(b, level.Things);
+        history.Undo();
+        Assert.Equal(3, level.Things.Count);
+        Assert.Same(b, level.Things[1]);
+    }
+
+    [Fact]
+    public void CreateSector_BuildsBoxRoom_AndUndoes()
+    {
+        var level = new Level();
+        var box = SectorFactory.CreateBox(level, Vec3.Zero, 1.0, "wall.mat", 0);
+        var history = new EditHistory();
+        history.Do(new CreateSectorCommand(level, box));
+        Assert.Single(level.Sectors);
+        Assert.Equal(8, level.Sectors[0].Vertices.Count);
+        Assert.Equal(6, level.Sectors[0].Surfaces.Count);
+        Assert.All(level.Sectors[0].Surfaces, s => Assert.Equal(4, s.Corners.Count));
+        history.Undo();
+        Assert.Empty(level.Sectors);
+        history.Redo();
+        Assert.Single(level.Sectors);
+    }
+
+    [Fact]
+    public void DeleteSector_RestoresAtIndex()
+    {
+        var level = new Level();
+        var a = level.NewSector(); var b = level.NewSector(); var c = level.NewSector();
+        var history = new EditHistory();
+        history.Do(new DeleteSectorCommand(level, b));
+        Assert.Equal(2, level.Sectors.Count);
+        history.Undo();
+        Assert.Equal(3, level.Sectors.Count);
+        Assert.Same(b, level.Sectors[1]);
+    }
+
+    [Fact]
+    public void DeleteVertex_RemovesCorners_AndReverts()
+    {
+        var level = SampleScene.CreateCube();
+        var sector = level.Sectors[0];
+        var v = sector.Vertices[0];
+        int touching = sector.Surfaces.Count(s => s.Corners.Any(c => c.Vertex == v));
+        Assert.Equal(3, touching); // cube corner shared by 3 faces
+
+        var history = new EditHistory();
+        history.Do(new DeleteVertexCommand(sector, v));
+        Assert.Equal(7, sector.Vertices.Count);
+        Assert.DoesNotContain(sector.Surfaces.SelectMany(s => s.Corners), c => c.Vertex == v);
+
+        history.Undo();
+        Assert.Equal(8, sector.Vertices.Count);
+        Assert.Equal(3, sector.Surfaces.Count(s => s.Corners.Any(c => c.Vertex == v)));
+        Assert.All(sector.Surfaces, s => Assert.Equal(4, s.Corners.Count));
+    }
+
+    [Fact]
+    public void InsertSurfaceVertex_AddsCornerAndVertex_AndReverts()
+    {
+        var level = SampleScene.CreateCube();
+        var sector = level.Sectors[0];
+        var surf = sector.Surfaces[0];
+        int verts0 = sector.Vertices.Count, corners0 = surf.Corners.Count;
+
+        var history = new EditHistory();
+        history.Do(new InsertSurfaceVertexCommand(surf, 0));
+        Assert.Equal(corners0 + 1, surf.Corners.Count);
+        Assert.Equal(verts0 + 1, sector.Vertices.Count);
+
+        history.Undo();
+        Assert.Equal(corners0, surf.Corners.Count);
+        Assert.Equal(verts0, sector.Vertices.Count);
+    }
+}
+
 public class ThingPickTests
 {
     [Fact]

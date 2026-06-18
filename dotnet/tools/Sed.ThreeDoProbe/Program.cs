@@ -45,6 +45,6 @@ using var device = VulkanDevice.Create(ctx);
 using var renderer = new SceneRenderer(device);
 renderer.SetColormap(palette.PaletteRgb, palette.LightTable);
 renderer.SetScene(scene, Lookup);
-PngWriter.Write(outPath, renderer.Render(camera.ViewProjection((double)W / H), W, H, 0.1f, 0.1f, 0.12f), (int)W, (int)H);
+PngWriter.Write(outPath, renderer.Render(camera.ViewProjection((double)W / H), camera.Position, W, H, 0.1f, 0.1f, 0.12f), (int)W, (int)H);
 Console.WriteLine($"Rendered → {Path.GetFullPath(outPath)}");
 return 0;

@@ -58,8 +58,30 @@ public static class JklParser
             }
         }
 
+        ResolveAdjoins(geo);
+        if (doc is not null) doc.Materials.AddRange(geo.Materials);
         PostProcess(level);
         return level;
+    }
+
+    private static ColorF Grey(double i) => new((float)i, (float)i, (float)i);
+
+    /// <summary>Resolves surface→surface adjoin links via the parsed adjoin mirror pairs.</summary>
+    private static void ResolveAdjoins(GeoData geo)
+    {
+        foreach (var (globalIdx, surf) in geo.SurfaceByGlobalIndex)
+        {
+            if ((uint)globalIdx >= (uint)geo.Surfaces.Count) continue;
+            int nadj = geo.Surfaces[globalIdx].Adjoin;
+            if (nadj < 0 || nadj >= geo.Adjoins.Count) continue;
+            int mirror = geo.Adjoins[nadj].Mirror;
+            if (mirror < 0 || mirror >= geo.Adjoins.Count) continue;
+            if (geo.SurfaceByGlobalIndex.TryGetValue(geo.Adjoins[mirror].Surf, out var paired))
+            {
+                surf.Adjoin = paired;
+                surf.AdjoinFlags = geo.Adjoins[nadj].Flags;
+            }
+        }
     }
 
     internal static string[] SplitLines(string text) =>
@@ -148,10 +170,19 @@ public static class JklParser
                 JklReader.ParseFloat(t.ElementAtOrDefault(1) ?? "0")));
         }
 
-        // Adjoins: "i: flags mirror" — not needed to render; skip.
+        // Adjoins: "i: flags mirror"
         r.Next();
         int na = LastInt(r.Current);
-        for (int i = 0; i < na; i++) r.Next();
+        for (int i = 0; i < na; i++)
+        {
+            r.Next();
+            var t = JklReader.Tokens(JklReader.StripIndex(r.Current));
+            geo.Adjoins.Add(new TempAdjoin
+            {
+                Flags = JklReader.ParseHex(t.ElementAtOrDefault(0) ?? "0"),
+                Mirror = JklReader.ParseInt(t.ElementAtOrDefault(1) ?? "-1"),
+            });
+        }
 
         // Surfaces.
         r.Next();
@@ -159,7 +190,9 @@ public static class JklParser
         for (int i = 0; i < ns; i++)
         {
             r.Next();
-            geo.Surfaces.Add(ParseSurface(JklReader.StripIndex(r.Current), level.Header.Version, ijim, level));
+            var ts = ParseSurface(JklReader.StripIndex(r.Current), level.Header.Version, ijim, level);
+            geo.Surfaces.Add(ts);
+            if (ts.Adjoin >= 0 && ts.Adjoin < geo.Adjoins.Count) geo.Adjoins[ts.Adjoin].Surf = i;
         }
 
         // Normals: one line per surface — skip.
@@ -270,7 +303,20 @@ public static class JklParser
                 else if (w == "TINT" && t.Length >= 4)
                     sector.Tint = new ColorF((float)JklReader.ParseFloat(t[1]),
                         (float)JklReader.ParseFloat(t[2]), (float)JklReader.ParseFloat(t[3]));
-                // AMBIENT / EXTRA / SOUND / COLORMAP / etc. are not needed to render.
+                else if (w == "AMBIENT" && t.Length >= 3) // "AMBIENT LIGHT i" (JK: single intensity)
+                    sector.Ambient = Grey(JklReader.ParseFloat(t[2]));
+                else if (w == "EXTRA" && t.Length >= 3)  // "EXTRA LIGHT i"
+                    sector.ExtraLight = Grey(JklReader.ParseFloat(t[2]));
+                else if (w == "COLORMAP" && t.Length >= 2)
+                {
+                    int ci = JklReader.ParseInt(t[1]);
+                    sector.ColorMap = (uint)ci < (uint)level.ColorMaps.Count ? level.ColorMaps[ci] : string.Empty;
+                }
+                else if (w == "SOUND" && t.Length >= 3)
+                {
+                    sector.Sound = t[1];
+                    sector.SoundVolume = JklReader.ParseFloat(t[2]);
+                }
             }
         }
     }
@@ -284,8 +330,14 @@ public static class JklParser
             var ts = geo.Surfaces[isurf];
             var surf = sector.NewSurface();
             surf.Material = geo.GetMaterial(ts.Material);
+            surf.MaterialIndex = ts.Material;
             surf.SurfFlags = ts.SurfFlags;
             surf.FaceFlags = ts.FaceFlags;
+            surf.Geo = ts.Geo;
+            surf.Light = ts.Light;
+            surf.Tex = ts.Tex;
+            surf.ExtraLightIntensity = ts.ExtraLight.R;
+            geo.SurfaceByGlobalIndex[isurf] = surf;
 
             for (int j = 0; j < ts.Vxs.Count; j++)
             {
@@ -337,6 +389,7 @@ public static class JklParser
     private static void LoadThings(JklReader r, Level level, JklDocument? doc)
     {
         if (!r.Next()) return;
+        if (doc is not null) doc.ThingsCountLine = r.LineNumber - 1;
         int n = LastInt(r.Current);
         for (int i = 0; i < n; i++)
         {

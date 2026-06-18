@@ -40,7 +40,7 @@ using var ctx = VulkanContext.Create("SED JKL Probe");
 using var device = VulkanDevice.Create(ctx);
 using var renderer = new SceneRenderer(device);
 renderer.SetMesh(mesh);
-var pixels = renderer.Render(mvp, Width, Height);
+var pixels = renderer.Render(mvp, camera.Position, Width, Height);
 
 PngWriter.Write(outPath, pixels, (int)Width, (int)Height);
 long lit = 0;

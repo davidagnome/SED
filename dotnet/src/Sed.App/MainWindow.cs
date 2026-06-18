@@ -325,9 +325,17 @@ public class MainWindow : Window
         undo.Click += (_, _) => _view.History.Undo();
         var redo = new MenuItem { Header = "_Redo", InputGesture = new KeyGesture(Key.Y, KeyModifiers.Control) };
         redo.Click += (_, _) => _view.History.Redo();
+        var newSector = new MenuItem { Header = "_New Box Sector", InputGesture = new KeyGesture(Key.N) };
+        newSector.Click += (_, _) => _view.CreateSector();
+        var delSector = new MenuItem { Header = "Delete Se_ctor" };
+        delSector.Click += (_, _) => _view.DeleteSector();
+
         var edit = new MenuItem { Header = "_Edit" };
         edit.Items.Add(undo);
         edit.Items.Add(redo);
+        edit.Items.Add(new Separator());
+        edit.Items.Add(newSector);
+        edit.Items.Add(delSector);
         _view.History.Changed += () =>
         {
             undo.IsEnabled = _view.History.CanUndo;
@@ -347,7 +355,9 @@ public class MainWindow : Window
         }
 
         var view = new MenuItem { Header = "_View" };
-        view.Items.Add(new MenuItem { Header = "3D Preview" });
+        var brightness = new MenuItem { Header = "Cycle _Brightness", InputGesture = new KeyGesture(Key.B) };
+        brightness.Click += (_, _) => _view.CycleBrightness();
+        view.Items.Add(brightness);
         var help = new MenuItem { Header = "_Help" };
         help.Items.Add(new MenuItem { Header = "About SED" });
 

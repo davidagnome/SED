@@ -62,6 +62,8 @@ using var ctx = VulkanContext.Create("SED GameProbe");
 using var device = VulkanDevice.Create(ctx);
 using var renderer = new SceneRenderer(device);
 renderer.SetColormap(palette.PaletteRgb, palette.LightTable);
+renderer.SetSky(level.Header.CeilingSky.Height, (float)level.Header.CeilingSky.Offset.X, (float)level.Header.CeilingSky.Offset.Y);
+if (args.Contains("--bright")) renderer.SetBrightness(1f);
 renderer.SetScene(scene, Lookup);
 Console.WriteLine($"  materials resolved {ok}/{total}");
 
@@ -69,7 +71,7 @@ Console.WriteLine($"  materials resolved {ok}/{total}");
 double markerSize = radius * 0.012;
 renderer.SetMarkers(SceneBuilder.BuildThingMarkers(unmodeled, markerSize, new ColorF(0.2f, 0.9f, 1f)));
 
-PngWriter.Write(outPath, renderer.Render(mvp, W, H), (int)W, (int)H);
+PngWriter.Write(outPath, renderer.Render(mvp, camera.Position, W, H), (int)W, (int)H);
 Console.WriteLine($"Rendered → {Path.GetFullPath(outPath)}");
 return 0;
 

@@ -28,6 +28,12 @@ public sealed class Surface
     public string Material = string.Empty;
     public int MaterialIndex = -1;
 
+    // Engine fields preserved verbatim for faithful save.
+    public int Geo = 4;
+    public int Light = 3;
+    public int Tex = 3;
+    public float ExtraLightIntensity;
+
     /// <summary>True if this surface is a sky (horizon or ceiling) surface.</summary>
     public bool IsSky => (SurfFlags & (SfSkyHorizon | SfSkyCeiling)) != 0;
 
