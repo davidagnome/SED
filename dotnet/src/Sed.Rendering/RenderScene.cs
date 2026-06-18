@@ -1,10 +1,13 @@
 namespace Sed.Rendering;
 
-/// <summary>RGBA8 texture pixels supplied by a <see cref="TextureLookup"/>.</summary>
-public readonly record struct TextureData(int Width, int Height, byte[] Rgba);
+/// <summary>
+/// An 8-bit palette-indexed texture (one byte per pixel). The renderer applies
+/// the CMP palette + light table on the GPU, so lighting matches the engine.
+/// </summary>
+public readonly record struct IndexedTexture(int Width, int Height, byte[] Indices);
 
-/// <summary>Resolves a material name (e.g. "wall01.mat") to pixels, or null if unavailable.</summary>
-public delegate TextureData? TextureLookup(string material);
+/// <summary>Resolves a material name (e.g. "wall01.mat") to indexed pixels, or null.</summary>
+public delegate IndexedTexture? TextureLookup(string material);
 
 /// <summary>A contiguous run of indices in a <see cref="Mesh"/> that share one material.</summary>
 public sealed class Submesh
@@ -12,6 +15,8 @@ public sealed class Submesh
     public string Material { get; init; } = string.Empty;
     public int IndexOffset { get; init; }
     public int IndexCount { get; init; }
+    /// <summary>Drawn in a separate alpha-blended pass after opaque geometry.</summary>
+    public bool Translucent { get; init; }
 }
 
 /// <summary>

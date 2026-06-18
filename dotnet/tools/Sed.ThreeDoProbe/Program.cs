@@ -30,7 +30,7 @@ var scene = assembler.Build();
 Console.WriteLine($"  submeshes={scene.Submeshes.Count}, tris={scene.Mesh.Indices.Count / 3}");
 if (scene.Mesh.IsEmpty) { Console.Error.WriteLine("empty model mesh"); return 3; }
 
-TextureData? Lookup(string m) { var t = library.Get(m); return t is { } r ? new TextureData(r.Width, r.Height, r.Rgba) : null; }
+IndexedTexture? Lookup(string m) { var t = library.GetIndexed(m); return t is { } r ? new IndexedTexture(r.Width, r.Height, r.Indices) : null; }
 
 // Frame the model.
 var box = Box.Empty;
@@ -43,6 +43,7 @@ const uint W = 640, H = 640;
 using var ctx = VulkanContext.Create("SED 3DO Probe");
 using var device = VulkanDevice.Create(ctx);
 using var renderer = new SceneRenderer(device);
+renderer.SetColormap(palette.PaletteRgb, palette.LightTable);
 renderer.SetScene(scene, Lookup);
 PngWriter.Write(outPath, renderer.Render(camera.ViewProjection((double)W / H), W, H, 0.1f, 0.1f, 0.12f), (int)W, (int)H);
 Console.WriteLine($"Rendered → {Path.GetFullPath(outPath)}");

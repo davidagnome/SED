@@ -18,10 +18,10 @@ math. See the repo-root analysis for the full option comparison (Lazarus/LCL vs
 | Project | Role | Status |
 |---|---|---|
 | `Sed.Core` | Math + domain model + **`Editing/`** (`EditHistory`; Move{Thing,Vertex,Surface}Command) | ✅ unit-tested |
-| `Sed.Formats` | **JKL** (`Jkl/`, incl. templates), **GOB** (`Gob/`), **MAT/CMP** (`Material/`), **3DO models** (`ThreeDo/`), **`Game/GameInstall`** | ✅ validated on retail data |
+| `Sed.Formats` | **JKL** read (`JklParser`) + **patch-save** (`JklDocument`/`JklWriter`), **GOB**, **MAT/CMP**, **3DO models**, templates, **`Game/GameInstall`** | ✅ validated on retail data |
 | `Sed.Core` | + `Mat4` (column-major, Vulkan-clip perspective/lookat) | ✅ 9 tests |
 | `Sed.Rendering` | `Camera`, `Mesh`, **`SceneAssembler`** (level surfaces + instanced 3DO models → material batches), `SceneBuilder`, `Picker`, `PngWriter` | ✅ |
-| `Sed.Rendering.Vulkan` | Silk.NET backend; textured `SceneRenderer` (descriptor-set textures, depth, MVP) + **depth-off selection-highlight overlay** | ✅ verified on M4 Pro |
+| `Sed.Rendering.Vulkan` | Silk.NET backend; **indexed-texture `SceneRenderer`** — CMP palette + 64-level light ramp shading in-shader, opaque/translucent/flat passes, depth, MVP, selection/marker overlays | ✅ verified on M4 Pro |
 | `Sed.App` | Avalonia shell + `VulkanView`: fly camera; click-pick **things / vertices / surfaces**; arrow-keys move selection (thing/vertex/whole surface) with **live mesh rebuild** + Edit ▸ Undo/Redo; Game menu + File ▸ Open | ✅ |
 | `tools/Sed.GobTool`, `Sed.JklProbe`, `Sed.MatTool`, `Sed.LevelRender` | GOB list / JKL render / MAT→PNG / **textured level → PNG** | ✅ |
 | `tools/Sed.VulkanSmoke`, `Sed.TriangleProbe`, `Sed.SceneProbe`, `Sed.AppShot` | bring-up + capture probes | ✅ |
@@ -107,12 +107,22 @@ length, char[128] name }. Names use `\` separators (e.g. `jkl\01narshadda.jkl`).
     →`model3d` resolution (`Level.GetThingModel`); `SceneAssembler.AddThings`
     instances models at thing pos/orientation; model-less things keep markers.
     Verified: standalone table model + Katarn chair in-room.
-11. ~~Geometry editing~~ ✅ `MoveVertexCommand`/`MoveSurfaceCommand`,
-    `Picker.PickVertex`, `SceneRenderer.UpdateGeometry` (re-upload geometry,
-    reuse textures). Click a face → its sector's vertices show as orange dots;
-    click a vertex to move it, or move the whole surface; undo/redo.
-    **Next:** thing create/delete, vertex add/split, **saving back to JKL**
-    (round-trip), then sky/transparency/real lighting.
+11. ~~Geometry editing~~ ✅
+12. ~~Saving back to JKL~~ ✅ **patch writer** (`JklDocument` records source lines +
+    vertex/thing line numbers during `ParseDocument`; `JklWriter` rewrites only
+    moved vertex/thing lines, preserving COGs/lights/everything else verbatim →
+    game-loadable). File ▸ Save As in the editor. Only *moved* vertices are
+    rewritten (JK shares world vertices across sectors). Verified round-trip on
+    retail `03katarn` (vertex + thing edits persist, all sections intact).
+13. ~~Sky, transparency, real colormap lighting~~ ✅ **indexed rendering**: MAT
+    textures uploaded as R8 palette indices; CMP palette (256×1 RGBA) + light ramp
+    (256×64 R8) uploaded once; fragment shader shades `index` through
+    `lightRamp[level][index]` (level = vertex intensity×63) then resolves via
+    palette — matches engine lighting (lit lamps glow, walls dark). Sky surfaces
+    (`SF_SkyHorizon/Ceiling`) drawn full-bright; translucent surfaces
+    (`FF_Transluent`) alpha-blended in a 2nd pass with index-0 cutout.
+    **Next:** thing create/delete, vertex add/split; scrolling sky projection;
+    editor brightness control; per-edit scene-reassemble optimization.
 
 ### MAT / CMP formats (from `src/graph_files.pas`)
 

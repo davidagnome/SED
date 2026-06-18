@@ -45,11 +45,11 @@ var scene = assembler.Build();
 Console.WriteLine($"  things with models: {level.Things.Count - unmodeled.Count}/{level.Things.Count}");
 
 int ok = 0, total = 0;
-TextureData? Lookup(string m)
+IndexedTexture? Lookup(string m)
 {
     total++;
-    var t = library.Get(m);
-    if (t is { } r) { ok++; return new TextureData(r.Width, r.Height, r.Rgba); }
+    var t = library.GetIndexed(m);
+    if (t is { } r) { ok++; return new IndexedTexture(r.Width, r.Height, r.Indices); }
     return null;
 }
 
@@ -61,6 +61,7 @@ var mvp = camera.ViewProjection((double)W / H);
 using var ctx = VulkanContext.Create("SED GameProbe");
 using var device = VulkanDevice.Create(ctx);
 using var renderer = new SceneRenderer(device);
+renderer.SetColormap(palette.PaletteRgb, palette.LightTable);
 renderer.SetScene(scene, Lookup);
 Console.WriteLine($"  materials resolved {ok}/{total}");
 

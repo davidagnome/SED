@@ -34,6 +34,7 @@ public class MainWindow : Window
     private GobArchive? _levelArchive;
     private GobArchive[] _materialArchives = Array.Empty<GobArchive>();
     private Sed.Formats.ThreeDo.ModelLibrary? _modelLibrary;
+    private JklDocument? _currentDoc;     // for saving the currently loaded level
     private List<GobEntry> _levels = new();
 
     public MainWindow()
@@ -183,7 +184,8 @@ public class MainWindow : Window
             }
             else
             {
-                LoadLevel(JklParser.ParseFile(path), file.Name);
+                _currentDoc = JklParser.ParseDocument(File.ReadAllText(path));
+                LoadLevel(_currentDoc.Level, file.Name);
             }
         }
         catch (Exception ex)
@@ -225,43 +227,75 @@ public class MainWindow : Window
         int i = _levelList.SelectedIndex;
         if (_levelArchive is null || (uint)i >= (uint)_levels.Count) return;
         var entry = _levels[i];
-        try { LoadLevel(JklParser.Parse(_levelArchive.ReadText(entry)), Path.GetFileName(entry.NormalizedName)); }
+        try
+        {
+            _currentDoc = JklParser.ParseDocument(_levelArchive.ReadText(entry));
+            LoadLevel(_currentDoc.Level, Path.GetFileName(entry.NormalizedName));
+        }
         catch (Exception ex) { _status.Text = $"Failed to parse {entry.Name}: {ex.Message}"; }
     }
 
     private void LoadLevel(Level level, string name)
     {
         TextureLookup? textures = null;
-        try { textures = MakeTextureLookup(level); }
-        catch { /* untextured fallback */ }
-
         Func<string, Sed.Formats.ThreeDo.ThreeDoModel?>? models = null;
+        byte[]? paletteRgb = null, lightTable = null;
+
         if (_materialArchives.Length > 0)
         {
-            _modelLibrary ??= new Sed.Formats.ThreeDo.ModelLibrary(_materialArchives);
-            models = _modelLibrary.Get;
+            try
+            {
+                var colormap = MaterialLibrary.LoadPalette(level.ColorMaps, _materialArchives);
+                var library = new MaterialLibrary(colormap, _materialArchives);
+                paletteRgb = colormap.PaletteRgb;
+                lightTable = colormap.LightTable;
+                textures = material =>
+                {
+                    var t = library.GetIndexed(material);
+                    return t is { } r ? new IndexedTexture(r.Width, r.Height, r.Indices) : null;
+                };
+                _modelLibrary ??= new Sed.Formats.ThreeDo.ModelLibrary(_materialArchives);
+                models = _modelLibrary.Get;
+            }
+            catch { textures = null; }
         }
 
-        _view.SetLevel(level, textures, models);
+        _view.SetLevel(level, textures, models, paletteRgb, lightTable);
         int surfaces = level.Sectors.Sum(s => s.Surfaces.Count);
         _status.Text = $"{name} — {level.Sectors.Count} sectors, {surfaces} surfaces, " +
                        $"{level.Things.Count} things ({(textures is null ? "untextured" : "textured")})";
     }
 
-    private TextureLookup? MakeTextureLookup(Level level)
+    private async void SaveAs()
     {
-        if (_materialArchives.Length == 0) return null;
-        var palette = MaterialLibrary.LoadPalette(level.ColorMaps, _materialArchives);
-        var library = new MaterialLibrary(palette, _materialArchives);
-        return material =>
+        if (_currentDoc is null) { _status.Text = "No level loaded to save."; return; }
+
+        var file = await StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
         {
-            var t = library.Get(material);
-            return t is { } r ? new TextureData(r.Width, r.Height, r.Rgba) : null;
-        };
+            Title = "Save level as JKL",
+            DefaultExtension = "jkl",
+            SuggestedFileName = "edited.jkl",
+            FileTypeChoices = new[]
+            {
+                new FilePickerFileType("Sith engine level (*.jkl)") { Patterns = new[] { "*.jkl" } },
+            },
+        });
+        if (file is null) return;
+
+        try
+        {
+            JklWriter.Save(_currentDoc, file.Path.LocalPath);
+            _status.Text = $"Saved → {file.Name}";
+        }
+        catch (Exception ex)
+        {
+            _status.Text = $"Save failed: {ex.Message}";
+        }
     }
 
     private void ClearSession()
     {
+        _currentDoc = null;
         _install?.Dispose(); _install = null;
         _adhocGob?.Dispose(); _adhocGob = null;
         _adhocResourceGob?.Dispose(); _adhocResourceGob = null;
@@ -281,7 +315,9 @@ public class MainWindow : Window
             as Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime)?.Shutdown();
         var file = new MenuItem { Header = "_File" };
         file.Items.Add(open);
-        file.Items.Add(new MenuItem { Header = "_Save", IsEnabled = false });
+        var saveAs = new MenuItem { Header = "Save _As…", InputGesture = new KeyGesture(Key.S, KeyModifiers.Control) };
+        saveAs.Click += (_, _) => SaveAs();
+        file.Items.Add(saveAs);
         file.Items.Add(new Separator());
         file.Items.Add(exit);
 

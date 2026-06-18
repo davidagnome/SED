@@ -10,10 +10,10 @@ namespace Sed.Rendering.Vulkan;
 
 /// <summary>
 /// Renders a textured, depth-tested <see cref="RenderScene"/> to an offscreen
-/// image and reads it back as RGBA8. Each submesh's material is uploaded as a
-/// sampled texture and bound via a descriptor set; the fragment shader modulates
-/// it by the per-vertex light intensity. Falls back to a white texture for
-/// missing materials. Targets are recreated on size change.
+/// image. Textures are 8-bit palette indices; the fragment shader shades each
+/// index through the CMP light ramp (by per-vertex intensity) and resolves it
+/// against the palette, matching the engine's lighting. Translucent submeshes are
+/// alpha-blended in a second pass; markers/selection draw flat (mode 1).
 /// </summary>
 public sealed unsafe class SceneRenderer : IDisposable
 {
@@ -27,57 +27,39 @@ public sealed unsafe class SceneRenderer : IDisposable
     private DescriptorSetLayout _setLayout;
     private Sampler _sampler;
     private PipelineLayout _layout;
-    private Pipeline _pipeline;
-    private Pipeline _selectionPipeline;   // depth-test off: highlight always visible
+    private Pipeline _pipeline;             // opaque, depth on
+    private Pipeline _translucentPipeline;  // depth test on / write off, alpha blend
+    private Pipeline _selectionPipeline;    // depth off (highlight)
 
-    // Selection overlay geometry
-    private VkBuffer _selVertexBuffer;
-    private DeviceMemory _selVertexMemory;
-    private VkBuffer _selIndexBuffer;
-    private DeviceMemory _selIndexMemory;
-    private uint _selIndexCount;
-
-    // Thing markers (depth-tested, white texture, vertex-colored)
-    private VkBuffer _markerVertexBuffer;
-    private DeviceMemory _markerVertexMemory;
-    private VkBuffer _markerIndexBuffer;
-    private DeviceMemory _markerIndexMemory;
-    private uint _markerIndexCount;
-
-    // Persistent 1x1 white fallback texture.
-    private GpuTexture _white;
+    private GpuTexture _white;              // 1x1 index, for flat marker/selection draws
+    private GpuTexture _palette;            // 256x1 RGBA
+    private GpuTexture _lightRamp;          // 256x64 R8
 
     // Geometry
-    private VkBuffer _vertexBuffer;
-    private DeviceMemory _vertexMemory;
-    private VkBuffer _indexBuffer;
-    private DeviceMemory _indexMemory;
+    private VkBuffer _vertexBuffer; private DeviceMemory _vertexMemory;
+    private VkBuffer _indexBuffer; private DeviceMemory _indexMemory;
 
-    // Per-scene resources
+    // Per-scene
     private DescriptorPool _descPool;
     private readonly List<GpuTexture> _sceneTextures = new();
     private readonly List<DrawItem> _draws = new();
     private readonly Dictionary<string, MatTex> _materialCache = new(StringComparer.OrdinalIgnoreCase);
 
-    // Size-dependent targets
+    // Overlays
+    private VkBuffer _selVertexBuffer; private DeviceMemory _selVertexMemory;
+    private VkBuffer _selIndexBuffer; private DeviceMemory _selIndexMemory; private uint _selIndexCount;
+    private VkBuffer _markerVertexBuffer; private DeviceMemory _markerVertexMemory;
+    private VkBuffer _markerIndexBuffer; private DeviceMemory _markerIndexMemory; private uint _markerIndexCount;
+
+    // Targets
     private uint _width, _height;
-    private Image _color, _depth;
-    private DeviceMemory _colorMem, _depthMem;
-    private ImageView _colorView, _depthView;
-    private Framebuffer _framebuffer;
-    private VkBuffer _readback;
-    private DeviceMemory _readbackMem;
+    private Image _color, _depth; private DeviceMemory _colorMem, _depthMem;
+    private ImageView _colorView, _depthView; private Framebuffer _framebuffer;
+    private VkBuffer _readback; private DeviceMemory _readbackMem;
 
-    private readonly record struct DrawItem(DescriptorSet Set, uint IndexOffset, uint IndexCount, float InvW, float InvH);
+    private readonly record struct DrawItem(DescriptorSet Set, uint IndexOffset, uint IndexCount, float InvW, float InvH, bool Translucent, bool Flat);
     private readonly record struct MatTex(DescriptorSet Set, float InvW, float InvH);
-
-    private struct GpuTexture
-    {
-        public Image Image;
-        public DeviceMemory Memory;
-        public ImageView View;
-        public DescriptorSet Set;
-    }
+    private struct GpuTexture { public Image Image; public DeviceMemory Memory; public ImageView View; public DescriptorSet Set; }
 
     public SceneRenderer(VulkanDevice device)
     {
@@ -86,30 +68,53 @@ public sealed unsafe class SceneRenderer : IDisposable
         CreateRenderPass();
         CreateSampler();
         CreateDescriptorSetLayout();
-        CreatePipeline();
-        _white = CreateTextureImage(new byte[] { 255, 255, 255, 255 }, 1, 1);
+        CreatePipelines();
+
+        _white = CreateImage2D(new byte[] { 255 }, 1, 1, Format.R8Unorm, 1);
+        // Default colormap: grayscale palette + identity ramp (replaced by SetColormap).
+        var defPal = new byte[256 * 3];
+        for (int i = 0; i < 256; i++) { defPal[i * 3] = (byte)i; defPal[i * 3 + 1] = (byte)i; defPal[i * 3 + 2] = (byte)i; }
+        var defRamp = new byte[64 * 256];
+        for (int l = 0; l < 64; l++) for (int i = 0; i < 256; i++) defRamp[l * 256 + i] = (byte)i;
+        SetColormap(defPal, defRamp);
     }
 
-    /// <summary>Convenience for untextured geometry: one white-textured submesh.</summary>
+    /// <summary>Uploads the level palette (256×3 RGB) and 64×256 light ramp used for shading.</summary>
+    public void SetColormap(byte[] paletteRgb, byte[] lightTable)
+    {
+        DestroyTexture(_palette);
+        DestroyTexture(_lightRamp);
+
+        var rgba = new byte[256 * 4];
+        for (int i = 0; i < 256; i++)
+        {
+            rgba[i * 4] = paletteRgb[i * 3]; rgba[i * 4 + 1] = paletteRgb[i * 3 + 1];
+            rgba[i * 4 + 2] = paletteRgb[i * 3 + 2]; rgba[i * 4 + 3] = 255;
+        }
+        _palette = CreateImage2D(rgba, 256, 1, Format.R8G8B8A8Unorm, 4);
+        _lightRamp = CreateImage2D(lightTable, 256, 64, Format.R8Unorm, 1);
+    }
+
+    /// <summary>Untextured convenience: one flat-shaded submesh using vertex colors.</summary>
     public void SetMesh(Mesh mesh)
     {
         var scene = new RenderScene();
         scene.Mesh.Vertices.AddRange(mesh.Vertices);
         scene.Mesh.Indices.AddRange(mesh.Indices);
         scene.Submeshes.Add(new Submesh { Material = "", IndexOffset = 0, IndexCount = mesh.Indices.Count });
-        SetScene(scene, _ => null);
+        SetScene(scene, _ => null, flat: true);
     }
 
-    /// <summary>Uploads scene geometry and per-material textures.</summary>
-    public void SetScene(RenderScene scene, TextureLookup lookup)
+    public void SetScene(RenderScene scene, TextureLookup lookup) => SetScene(scene, lookup, flat: false);
+
+    private void SetScene(RenderScene scene, TextureLookup lookup, bool flat)
     {
         DestroyScene();
         if (scene.Mesh.IsEmpty) return;
 
         UploadGeometry(scene);
-
         CreateDescriptorPool((uint)scene.Submeshes.Count + 1);
-        _white.Set = AllocateTextureDescriptor(_white.View);
+        _white.Set = AllocateMaterialDescriptor(_white.View);
         _materialCache.Clear();
 
         foreach (var sub in scene.Submeshes)
@@ -117,10 +122,10 @@ public sealed unsafe class SceneRenderer : IDisposable
             if (string.IsNullOrEmpty(sub.Material) || _materialCache.ContainsKey(sub.Material)) continue;
             var tex = lookup(sub.Material);
             MatTex mt;
-            if (tex is { } t && t.Rgba.Length == t.Width * t.Height * 4 && t.Width > 0 && t.Height > 0)
+            if (tex is { } t && t.Indices.Length == t.Width * t.Height && t.Width > 0 && t.Height > 0)
             {
-                var gpu = CreateTextureImage(t.Rgba, (uint)t.Width, (uint)t.Height);
-                gpu.Set = AllocateTextureDescriptor(gpu.View);
+                var gpu = CreateImage2D(t.Indices, (uint)t.Width, (uint)t.Height, Format.R8Unorm, 1);
+                gpu.Set = AllocateMaterialDescriptor(gpu.View);
                 _sceneTextures.Add(gpu);
                 mt = new MatTex(gpu.Set, 1f / t.Width, 1f / t.Height);
             }
@@ -128,76 +133,54 @@ public sealed unsafe class SceneRenderer : IDisposable
             _materialCache[sub.Material] = mt;
         }
 
-        RebuildDraws(scene);
+        RebuildDraws(scene, flat);
     }
 
-    /// <summary>
-    /// Re-uploads scene geometry (e.g. after a vertex edit) while reusing the
-    /// already-loaded material textures — fast enough for interactive editing.
-    /// </summary>
+    /// <summary>Re-uploads geometry after an edit, reusing the loaded textures.</summary>
     public void UpdateGeometry(RenderScene scene)
     {
         if (scene.Mesh.IsEmpty) return;
         DestroyGeometryBuffers();
         UploadGeometry(scene);
-        RebuildDraws(scene);
+        RebuildDraws(scene, flat: false);
     }
 
-    private void UploadGeometry(RenderScene scene)
-    {
-        var verts = scene.Mesh.Vertices.ToArray();
-        var indices = scene.Mesh.Indices.ToArray();
-        (_vertexBuffer, _vertexMemory) = CreateHostBuffer(
-            (ulong)(verts.Length * (int)MeshVertex.Stride), BufferUsageFlags.VertexBufferBit);
-        Upload(_vertexMemory, MemoryMarshal.AsBytes<MeshVertex>(verts));
-        (_indexBuffer, _indexMemory) = CreateHostBuffer(
-            (ulong)(indices.Length * sizeof(uint)), BufferUsageFlags.IndexBufferBit);
-        Upload(_indexMemory, MemoryMarshal.AsBytes<uint>(indices));
-    }
-
-    private void RebuildDraws(RenderScene scene)
+    private void RebuildDraws(RenderScene scene, bool flat)
     {
         _draws.Clear();
         foreach (var sub in scene.Submeshes)
         {
-            var mt = !string.IsNullOrEmpty(sub.Material) && _materialCache.TryGetValue(sub.Material, out var cached)
-                ? cached : new MatTex(_white.Set, 1f, 1f);
-            _draws.Add(new DrawItem(mt.Set, (uint)sub.IndexOffset, (uint)sub.IndexCount, mt.InvW, mt.InvH));
+            var mt = !string.IsNullOrEmpty(sub.Material) && _materialCache.TryGetValue(sub.Material, out var c)
+                ? c : new MatTex(_white.Set, 1f, 1f);
+            _draws.Add(new DrawItem(mt.Set, (uint)sub.IndexOffset, (uint)sub.IndexCount, mt.InvW, mt.InvH, sub.Translucent, flat));
         }
     }
 
-    /// <summary>Sets (or clears) the highlighted overlay geometry; its vertex colors are drawn as-is.</summary>
-    public void SetSelection(Mesh? mesh)
+    public void SetSelection(Mesh? mesh) =>
+        (_selVertexBuffer, _selVertexMemory, _selIndexBuffer, _selIndexMemory, _selIndexCount) =
+            UploadOverlay(mesh, _selVertexBuffer, _selVertexMemory, _selIndexBuffer, _selIndexMemory);
+
+    public void SetMarkers(Mesh? mesh) =>
+        (_markerVertexBuffer, _markerVertexMemory, _markerIndexBuffer, _markerIndexMemory, _markerIndexCount) =
+            UploadOverlay(mesh, _markerVertexBuffer, _markerVertexMemory, _markerIndexBuffer, _markerIndexMemory);
+
+    private (VkBuffer, DeviceMemory, VkBuffer, DeviceMemory, uint) UploadOverlay(
+        Mesh? mesh, VkBuffer oldVb, DeviceMemory oldVm, VkBuffer oldIb, DeviceMemory oldIm)
     {
-        DestroySelection();
-        if (mesh is null || mesh.IsEmpty) { _selIndexCount = 0; return; }
+        var d = _dev.Device;
+        if (oldVb.Handle != 0) _vk.DestroyBuffer(d, oldVb, null);
+        if (oldVm.Handle != 0) _vk.FreeMemory(d, oldVm, null);
+        if (oldIb.Handle != 0) _vk.DestroyBuffer(d, oldIb, null);
+        if (oldIm.Handle != 0) _vk.FreeMemory(d, oldIm, null);
+        if (mesh is null || mesh.IsEmpty) return (default, default, default, default, 0);
 
         var verts = mesh.Vertices.ToArray();
         var indices = mesh.Indices.ToArray();
-        _selIndexCount = (uint)indices.Length;
-        (_selVertexBuffer, _selVertexMemory) = CreateHostBuffer(
-            (ulong)(verts.Length * (int)MeshVertex.Stride), BufferUsageFlags.VertexBufferBit);
-        Upload(_selVertexMemory, MemoryMarshal.AsBytes<MeshVertex>(verts));
-        (_selIndexBuffer, _selIndexMemory) = CreateHostBuffer(
-            (ulong)(indices.Length * sizeof(uint)), BufferUsageFlags.IndexBufferBit);
-        Upload(_selIndexMemory, MemoryMarshal.AsBytes<uint>(indices));
-    }
-
-    /// <summary>Sets (or clears) depth-tested marker geometry (e.g. thing markers).</summary>
-    public void SetMarkers(Mesh? mesh)
-    {
-        DestroyMarkers();
-        if (mesh is null || mesh.IsEmpty) { _markerIndexCount = 0; return; }
-
-        var verts = mesh.Vertices.ToArray();
-        var indices = mesh.Indices.ToArray();
-        _markerIndexCount = (uint)indices.Length;
-        (_markerVertexBuffer, _markerVertexMemory) = CreateHostBuffer(
-            (ulong)(verts.Length * (int)MeshVertex.Stride), BufferUsageFlags.VertexBufferBit);
-        Upload(_markerVertexMemory, MemoryMarshal.AsBytes<MeshVertex>(verts));
-        (_markerIndexBuffer, _markerIndexMemory) = CreateHostBuffer(
-            (ulong)(indices.Length * sizeof(uint)), BufferUsageFlags.IndexBufferBit);
-        Upload(_markerIndexMemory, MemoryMarshal.AsBytes<uint>(indices));
+        var (vb, vm) = CreateHostBuffer((ulong)(verts.Length * (int)MeshVertex.Stride), BufferUsageFlags.VertexBufferBit);
+        Upload(vm, MemoryMarshal.AsBytes<MeshVertex>(verts));
+        var (ib, im) = CreateHostBuffer((ulong)(indices.Length * sizeof(uint)), BufferUsageFlags.IndexBufferBit);
+        Upload(im, MemoryMarshal.AsBytes<uint>(indices));
+        return (vb, vm, ib, im, (uint)indices.Length);
     }
 
     /// <summary>Renders one frame and returns tightly-packed RGBA8 pixels.</summary>
@@ -210,15 +193,11 @@ public sealed unsafe class SceneRenderer : IDisposable
         var clears = stackalloc ClearValue[2];
         clears[0] = new ClearValue { Color = new ClearColorValue(clearR, clearG, clearB, 1f) };
         clears[1] = new ClearValue { DepthStencil = new ClearDepthStencilValue(1f, 0) };
-
         var rpBegin = new RenderPassBeginInfo
         {
-            SType = StructureType.RenderPassBeginInfo,
-            RenderPass = _renderPass,
-            Framebuffer = _framebuffer,
+            SType = StructureType.RenderPassBeginInfo, RenderPass = _renderPass, Framebuffer = _framebuffer,
             RenderArea = new Rect2D(new Offset2D(0, 0), new Extent2D(_width, _height)),
-            ClearValueCount = 2,
-            PClearValues = clears,
+            ClearValueCount = 2, PClearValues = clears,
         };
         _vk.CmdBeginRenderPass(cmd, in rpBegin, SubpassContents.Inline);
 
@@ -226,52 +205,40 @@ public sealed unsafe class SceneRenderer : IDisposable
         var scissor = new Rect2D(new Offset2D(0, 0), new Extent2D(_width, _height));
         _vk.CmdSetViewport(cmd, 0, 1, in viewport);
         _vk.CmdSetScissor(cmd, 0, 1, in scissor);
-
         fixed (float* mvp = viewProjection.M)
-            _vk.CmdPushConstants(cmd, _layout, ShaderStageFlags.VertexBit, 0, 64, mvp);
+            _vk.CmdPushConstants(cmd, _layout, ShaderStageFlags.VertexBit | ShaderStageFlags.FragmentBit, 0, 64, mvp);
 
+        // Opaque pass.
         if (_draws.Count > 0)
         {
             _vk.CmdBindPipeline(cmd, PipelineBindPoint.Graphics, _pipeline);
-            var vb = _vertexBuffer;
-            ulong offset = 0;
-            _vk.CmdBindVertexBuffers(cmd, 0, 1, in vb, in offset);
-            _vk.CmdBindIndexBuffer(cmd, _indexBuffer, 0, IndexType.Uint32);
-
+            BindSceneBuffers(cmd);
             foreach (var draw in _draws)
-            {
-                var set = draw.Set;
-                _vk.CmdBindDescriptorSets(cmd, PipelineBindPoint.Graphics, _layout, 0, 1, in set, 0, null);
-                PushInvTexSize(cmd, draw.InvW, draw.InvH);
-                _vk.CmdDrawIndexed(cmd, draw.IndexCount, 1, draw.IndexOffset, 0, 0);
-            }
+                if (!draw.Translucent) DrawSubmesh(cmd, draw, draw.Flat ? 1u : 0u, 1f);
         }
 
-        // Thing markers (depth-tested, white texture, vertex-colored).
+        // Thing markers (flat).
         if (_markerIndexCount > 0 && _white.Set.Handle != 0)
         {
             _vk.CmdBindPipeline(cmd, PipelineBindPoint.Graphics, _pipeline);
-            var set = _white.Set;
-            _vk.CmdBindDescriptorSets(cmd, PipelineBindPoint.Graphics, _layout, 0, 1, in set, 0, null);
-            PushInvTexSize(cmd, 1f, 1f);
-            var vb = _markerVertexBuffer;
-            ulong offset = 0;
-            _vk.CmdBindVertexBuffers(cmd, 0, 1, in vb, in offset);
-            _vk.CmdBindIndexBuffer(cmd, _markerIndexBuffer, 0, IndexType.Uint32);
+            BindOverlay(cmd, _white.Set, _markerVertexBuffer, _markerIndexBuffer, 1u, 1f);
             _vk.CmdDrawIndexed(cmd, _markerIndexCount, 1, 0, 0, 0);
         }
 
-        // Selection overlay (depth-test off, white texture, bright per-vertex color).
+        // Translucent pass.
+        if (_draws.Any(d => d.Translucent))
+        {
+            _vk.CmdBindPipeline(cmd, PipelineBindPoint.Graphics, _translucentPipeline);
+            BindSceneBuffers(cmd);
+            foreach (var draw in _draws)
+                if (draw.Translucent) DrawSubmesh(cmd, draw, 0u, 0.5f);
+        }
+
+        // Selection overlay (flat, depth off).
         if (_selIndexCount > 0 && _white.Set.Handle != 0)
         {
             _vk.CmdBindPipeline(cmd, PipelineBindPoint.Graphics, _selectionPipeline);
-            var set = _white.Set;
-            _vk.CmdBindDescriptorSets(cmd, PipelineBindPoint.Graphics, _layout, 0, 1, in set, 0, null);
-            PushInvTexSize(cmd, 1f, 1f);
-            var vb = _selVertexBuffer;
-            ulong offset = 0;
-            _vk.CmdBindVertexBuffers(cmd, 0, 1, in vb, in offset);
-            _vk.CmdBindIndexBuffer(cmd, _selIndexBuffer, 0, IndexType.Uint32);
+            BindOverlay(cmd, _white.Set, _selVertexBuffer, _selIndexBuffer, 1u, 1f);
             _vk.CmdDrawIndexed(cmd, _selIndexCount, 1, 0, 0, 0);
         }
 
@@ -279,10 +246,7 @@ public sealed unsafe class SceneRenderer : IDisposable
 
         var region = new BufferImageCopy
         {
-            ImageSubresource = new ImageSubresourceLayers
-            {
-                AspectMask = ImageAspectFlags.ColorBit, MipLevel = 0, BaseArrayLayer = 0, LayerCount = 1,
-            },
+            ImageSubresource = new ImageSubresourceLayers { AspectMask = ImageAspectFlags.ColorBit, LayerCount = 1 },
             ImageExtent = new Extent3D(_width, _height, 1),
         };
         _vk.CmdCopyImageToBuffer(cmd, _color, ImageLayout.TransferSrcOptimal, _readback, 1, &region);
@@ -297,14 +261,38 @@ public sealed unsafe class SceneRenderer : IDisposable
         return pixels;
     }
 
-    /// <summary>Pushes the per-material inverse texture size (push-constant offset 64).</summary>
-    private void PushInvTexSize(CommandBuffer cmd, float invW, float invH)
+    private void BindSceneBuffers(CommandBuffer cmd)
     {
-        var inv = stackalloc float[2] { invW, invH };
-        _vk.CmdPushConstants(cmd, _layout, ShaderStageFlags.VertexBit, 64, 8, inv);
+        var vb = _vertexBuffer; ulong off = 0;
+        _vk.CmdBindVertexBuffers(cmd, 0, 1, in vb, in off);
+        _vk.CmdBindIndexBuffer(cmd, _indexBuffer, 0, IndexType.Uint32);
     }
 
-    // ---- pipeline / descriptors ----
+    private void DrawSubmesh(CommandBuffer cmd, DrawItem draw, uint mode, float alpha)
+    {
+        var set = draw.Set;
+        _vk.CmdBindDescriptorSets(cmd, PipelineBindPoint.Graphics, _layout, 0, 1, in set, 0, null);
+        PushTail(cmd, draw.InvW, draw.InvH, mode, alpha);
+        _vk.CmdDrawIndexed(cmd, draw.IndexCount, 1, draw.IndexOffset, 0, 0);
+    }
+
+    private void BindOverlay(CommandBuffer cmd, DescriptorSet set, VkBuffer vb, VkBuffer ib, uint mode, float alpha)
+    {
+        _vk.CmdBindDescriptorSets(cmd, PipelineBindPoint.Graphics, _layout, 0, 1, in set, 0, null);
+        PushTail(cmd, 1f, 1f, mode, alpha);
+        ulong off = 0;
+        _vk.CmdBindVertexBuffers(cmd, 0, 1, in vb, in off);
+        _vk.CmdBindIndexBuffer(cmd, ib, 0, IndexType.Uint32);
+    }
+
+    private void PushTail(CommandBuffer cmd, float invW, float invH, uint mode, float alpha)
+    {
+        var buf = stackalloc byte[16];
+        *(float*)(buf + 0) = invW; *(float*)(buf + 4) = invH; *(uint*)(buf + 8) = mode; *(float*)(buf + 12) = alpha;
+        _vk.CmdPushConstants(cmd, _layout, ShaderStageFlags.VertexBit | ShaderStageFlags.FragmentBit, 64, 16, buf);
+    }
+
+    // ---- setup ----
 
     private void CreateRenderPass()
     {
@@ -330,20 +318,18 @@ public sealed unsafe class SceneRenderer : IDisposable
             PipelineBindPoint = PipelineBindPoint.Graphics,
             ColorAttachmentCount = 1, PColorAttachments = &colorRef, PDepthStencilAttachment = &depthRef,
         };
-        var dependency = new SubpassDependency
+        var dep = new SubpassDependency
         {
             SrcSubpass = 0, DstSubpass = Vk.SubpassExternal,
-            SrcStageMask = PipelineStageFlags.ColorAttachmentOutputBit,
-            SrcAccessMask = AccessFlags.ColorAttachmentWriteBit,
+            SrcStageMask = PipelineStageFlags.ColorAttachmentOutputBit, SrcAccessMask = AccessFlags.ColorAttachmentWriteBit,
             DstStageMask = PipelineStageFlags.TransferBit, DstAccessMask = AccessFlags.TransferReadBit,
         };
-        var rpInfo = new RenderPassCreateInfo
+        var info = new RenderPassCreateInfo
         {
-            SType = StructureType.RenderPassCreateInfo,
-            AttachmentCount = 2, PAttachments = attachments,
-            SubpassCount = 1, PSubpasses = &subpass, DependencyCount = 1, PDependencies = &dependency,
+            SType = StructureType.RenderPassCreateInfo, AttachmentCount = 2, PAttachments = attachments,
+            SubpassCount = 1, PSubpasses = &subpass, DependencyCount = 1, PDependencies = &dep,
         };
-        if (_vk.CreateRenderPass(_dev.Device, in rpInfo, null, out _renderPass) != Result.Success)
+        if (_vk.CreateRenderPass(_dev.Device, in info, null, out _renderPass) != Result.Success)
             throw new VulkanException("vkCreateRenderPass failed");
     }
 
@@ -352,11 +338,8 @@ public sealed unsafe class SceneRenderer : IDisposable
         var info = new SamplerCreateInfo
         {
             SType = StructureType.SamplerCreateInfo,
-            MagFilter = Filter.Nearest, MinFilter = Filter.Nearest,
-            MipmapMode = SamplerMipmapMode.Nearest,
-            AddressModeU = SamplerAddressMode.Repeat,
-            AddressModeV = SamplerAddressMode.Repeat,
-            AddressModeW = SamplerAddressMode.Repeat,
+            MagFilter = Filter.Nearest, MinFilter = Filter.Nearest, MipmapMode = SamplerMipmapMode.Nearest,
+            AddressModeU = SamplerAddressMode.Repeat, AddressModeV = SamplerAddressMode.Repeat, AddressModeW = SamplerAddressMode.Repeat,
         };
         if (_vk.CreateSampler(_dev.Device, in info, null, out _sampler) != Result.Success)
             throw new VulkanException("vkCreateSampler failed");
@@ -364,17 +347,16 @@ public sealed unsafe class SceneRenderer : IDisposable
 
     private void CreateDescriptorSetLayout()
     {
-        var binding = new DescriptorSetLayoutBinding
-        {
-            Binding = 0,
-            DescriptorType = DescriptorType.CombinedImageSampler,
-            DescriptorCount = 1,
-            StageFlags = ShaderStageFlags.FragmentBit,
-        };
+        var bindings = stackalloc DescriptorSetLayoutBinding[3];
+        for (uint i = 0; i < 3; i++)
+            bindings[i] = new DescriptorSetLayoutBinding
+            {
+                Binding = i, DescriptorType = DescriptorType.CombinedImageSampler,
+                DescriptorCount = 1, StageFlags = ShaderStageFlags.FragmentBit,
+            };
         var info = new DescriptorSetLayoutCreateInfo
         {
-            SType = StructureType.DescriptorSetLayoutCreateInfo,
-            BindingCount = 1, PBindings = &binding,
+            SType = StructureType.DescriptorSetLayoutCreateInfo, BindingCount = 3, PBindings = bindings,
         };
         if (_vk.CreateDescriptorSetLayout(_dev.Device, in info, null, out _setLayout) != Result.Success)
             throw new VulkanException("vkCreateDescriptorSetLayout failed");
@@ -383,45 +365,42 @@ public sealed unsafe class SceneRenderer : IDisposable
     private void CreateDescriptorPool(uint maxSets)
     {
         DestroyDescriptorPool();
-        var size = new DescriptorPoolSize
-        {
-            Type = DescriptorType.CombinedImageSampler, DescriptorCount = maxSets,
-        };
+        var size = new DescriptorPoolSize { Type = DescriptorType.CombinedImageSampler, DescriptorCount = maxSets * 3 };
         var info = new DescriptorPoolCreateInfo
         {
-            SType = StructureType.DescriptorPoolCreateInfo,
-            MaxSets = maxSets, PoolSizeCount = 1, PPoolSizes = &size,
+            SType = StructureType.DescriptorPoolCreateInfo, MaxSets = maxSets, PoolSizeCount = 1, PPoolSizes = &size,
         };
         if (_vk.CreateDescriptorPool(_dev.Device, in info, null, out _descPool) != Result.Success)
             throw new VulkanException("vkCreateDescriptorPool failed");
     }
 
-    private DescriptorSet AllocateTextureDescriptor(ImageView view)
+    private DescriptorSet AllocateMaterialDescriptor(ImageView matView)
     {
         var layout = _setLayout;
         var alloc = new DescriptorSetAllocateInfo
         {
-            SType = StructureType.DescriptorSetAllocateInfo,
-            DescriptorPool = _descPool, DescriptorSetCount = 1, PSetLayouts = &layout,
+            SType = StructureType.DescriptorSetAllocateInfo, DescriptorPool = _descPool,
+            DescriptorSetCount = 1, PSetLayouts = &layout,
         };
         if (_vk.AllocateDescriptorSets(_dev.Device, in alloc, out var set) != Result.Success)
             throw new VulkanException("vkAllocateDescriptorSets failed");
 
-        var imageInfo = new DescriptorImageInfo
-        {
-            Sampler = _sampler, ImageView = view, ImageLayout = ImageLayout.ShaderReadOnlyOptimal,
-        };
-        var write = new WriteDescriptorSet
-        {
-            SType = StructureType.WriteDescriptorSet,
-            DstSet = set, DstBinding = 0, DescriptorCount = 1,
-            DescriptorType = DescriptorType.CombinedImageSampler, PImageInfo = &imageInfo,
-        };
-        _vk.UpdateDescriptorSets(_dev.Device, 1, in write, 0, null);
+        var infos = stackalloc DescriptorImageInfo[3];
+        infos[0] = new DescriptorImageInfo { Sampler = _sampler, ImageView = matView, ImageLayout = ImageLayout.ShaderReadOnlyOptimal };
+        infos[1] = new DescriptorImageInfo { Sampler = _sampler, ImageView = _palette.View, ImageLayout = ImageLayout.ShaderReadOnlyOptimal };
+        infos[2] = new DescriptorImageInfo { Sampler = _sampler, ImageView = _lightRamp.View, ImageLayout = ImageLayout.ShaderReadOnlyOptimal };
+        var writes = stackalloc WriteDescriptorSet[3];
+        for (uint i = 0; i < 3; i++)
+            writes[i] = new WriteDescriptorSet
+            {
+                SType = StructureType.WriteDescriptorSet, DstSet = set, DstBinding = i, DescriptorCount = 1,
+                DescriptorType = DescriptorType.CombinedImageSampler, PImageInfo = &infos[i],
+            };
+        _vk.UpdateDescriptorSets(_dev.Device, 3, writes, 0, null);
         return set;
     }
 
-    private void CreatePipeline()
+    private void CreatePipelines()
     {
         var vert = LoadShaderModule("mesh.vert.spv");
         var frag = LoadShaderModule("mesh.frag.spv");
@@ -429,107 +408,71 @@ public sealed unsafe class SceneRenderer : IDisposable
         try
         {
             var stages = stackalloc PipelineShaderStageCreateInfo[2];
-            stages[0] = new PipelineShaderStageCreateInfo
-            {
-                SType = StructureType.PipelineShaderStageCreateInfo,
-                Stage = ShaderStageFlags.VertexBit, Module = vert, PName = entry,
-            };
-            stages[1] = new PipelineShaderStageCreateInfo
-            {
-                SType = StructureType.PipelineShaderStageCreateInfo,
-                Stage = ShaderStageFlags.FragmentBit, Module = frag, PName = entry,
-            };
+            stages[0] = new PipelineShaderStageCreateInfo { SType = StructureType.PipelineShaderStageCreateInfo, Stage = ShaderStageFlags.VertexBit, Module = vert, PName = entry };
+            stages[1] = new PipelineShaderStageCreateInfo { SType = StructureType.PipelineShaderStageCreateInfo, Stage = ShaderStageFlags.FragmentBit, Module = frag, PName = entry };
 
-            var binding = new VertexInputBindingDescription
-            {
-                Binding = 0, Stride = MeshVertex.Stride, InputRate = VertexInputRate.Vertex,
-            };
+            var binding = new VertexInputBindingDescription { Binding = 0, Stride = MeshVertex.Stride, InputRate = VertexInputRate.Vertex };
             var attrs = stackalloc VertexInputAttributeDescription[4];
             attrs[0] = new VertexInputAttributeDescription(0, 0, Format.R32G32B32Sfloat, 0);
             attrs[1] = new VertexInputAttributeDescription(1, 0, Format.R32G32B32Sfloat, 12);
             attrs[2] = new VertexInputAttributeDescription(2, 0, Format.R32G32B32Sfloat, 24);
             attrs[3] = new VertexInputAttributeDescription(3, 0, Format.R32G32Sfloat, 36);
-            var vertexInput = new PipelineVertexInputStateCreateInfo
+            var vin = new PipelineVertexInputStateCreateInfo
             {
                 SType = StructureType.PipelineVertexInputStateCreateInfo,
                 VertexBindingDescriptionCount = 1, PVertexBindingDescriptions = &binding,
                 VertexAttributeDescriptionCount = 4, PVertexAttributeDescriptions = attrs,
             };
-            var inputAssembly = new PipelineInputAssemblyStateCreateInfo
-            {
-                SType = StructureType.PipelineInputAssemblyStateCreateInfo,
-                Topology = PrimitiveTopology.TriangleList,
-            };
-            var viewportState = new PipelineViewportStateCreateInfo
-            {
-                SType = StructureType.PipelineViewportStateCreateInfo, ViewportCount = 1, ScissorCount = 1,
-            };
-            var raster = new PipelineRasterizationStateCreateInfo
-            {
-                SType = StructureType.PipelineRasterizationStateCreateInfo,
-                PolygonMode = PolygonMode.Fill, CullMode = CullModeFlags.None,
-                FrontFace = FrontFace.CounterClockwise, LineWidth = 1f,
-            };
-            var multisample = new PipelineMultisampleStateCreateInfo
-            {
-                SType = StructureType.PipelineMultisampleStateCreateInfo,
-                RasterizationSamples = SampleCountFlags.Count1Bit,
-            };
-            var depthOn = new PipelineDepthStencilStateCreateInfo
-            {
-                SType = StructureType.PipelineDepthStencilStateCreateInfo,
-                DepthTestEnable = true, DepthWriteEnable = true, DepthCompareOp = CompareOp.Less,
-            };
-            var depthOff = new PipelineDepthStencilStateCreateInfo
-            {
-                SType = StructureType.PipelineDepthStencilStateCreateInfo,
-                DepthTestEnable = false, DepthWriteEnable = false, DepthCompareOp = CompareOp.Always,
-            };
-            var blendAttachment = new PipelineColorBlendAttachmentState
-            {
-                BlendEnable = false,
-                ColorWriteMask = ColorComponentFlags.RBit | ColorComponentFlags.GBit |
-                                 ColorComponentFlags.BBit | ColorComponentFlags.ABit,
-            };
-            var blend = new PipelineColorBlendStateCreateInfo
-            {
-                SType = StructureType.PipelineColorBlendStateCreateInfo,
-                AttachmentCount = 1, PAttachments = &blendAttachment,
-            };
-            var dynamicStates = stackalloc DynamicState[2] { DynamicState.Viewport, DynamicState.Scissor };
-            var dynamic = new PipelineDynamicStateCreateInfo
-            {
-                SType = StructureType.PipelineDynamicStateCreateInfo,
-                DynamicStateCount = 2, PDynamicStates = dynamicStates,
-            };
+            var ia = new PipelineInputAssemblyStateCreateInfo { SType = StructureType.PipelineInputAssemblyStateCreateInfo, Topology = PrimitiveTopology.TriangleList };
+            var vp = new PipelineViewportStateCreateInfo { SType = StructureType.PipelineViewportStateCreateInfo, ViewportCount = 1, ScissorCount = 1 };
+            var rs = new PipelineRasterizationStateCreateInfo { SType = StructureType.PipelineRasterizationStateCreateInfo, PolygonMode = PolygonMode.Fill, CullMode = CullModeFlags.None, FrontFace = FrontFace.CounterClockwise, LineWidth = 1f };
+            var ms = new PipelineMultisampleStateCreateInfo { SType = StructureType.PipelineMultisampleStateCreateInfo, RasterizationSamples = SampleCountFlags.Count1Bit };
 
-            var pushRange = new PushConstantRange(ShaderStageFlags.VertexBit, 0, 72); // mat4 + vec2
+            var depthOn = new PipelineDepthStencilStateCreateInfo { SType = StructureType.PipelineDepthStencilStateCreateInfo, DepthTestEnable = true, DepthWriteEnable = true, DepthCompareOp = CompareOp.Less };
+            var depthTestNoWrite = new PipelineDepthStencilStateCreateInfo { SType = StructureType.PipelineDepthStencilStateCreateInfo, DepthTestEnable = true, DepthWriteEnable = false, DepthCompareOp = CompareOp.Less };
+            var depthOff = new PipelineDepthStencilStateCreateInfo { SType = StructureType.PipelineDepthStencilStateCreateInfo, DepthTestEnable = false, DepthWriteEnable = false, DepthCompareOp = CompareOp.Always };
+
+            var noBlend = new PipelineColorBlendAttachmentState { BlendEnable = false, ColorWriteMask = ColorComponentFlags.RBit | ColorComponentFlags.GBit | ColorComponentFlags.BBit | ColorComponentFlags.ABit };
+            var alphaBlend = new PipelineColorBlendAttachmentState
+            {
+                BlendEnable = true,
+                SrcColorBlendFactor = BlendFactor.SrcAlpha, DstColorBlendFactor = BlendFactor.OneMinusSrcAlpha, ColorBlendOp = BlendOp.Add,
+                SrcAlphaBlendFactor = BlendFactor.One, DstAlphaBlendFactor = BlendFactor.Zero, AlphaBlendOp = BlendOp.Add,
+                ColorWriteMask = ColorComponentFlags.RBit | ColorComponentFlags.GBit | ColorComponentFlags.BBit | ColorComponentFlags.ABit,
+            };
+            var blendOpaque = new PipelineColorBlendStateCreateInfo { SType = StructureType.PipelineColorBlendStateCreateInfo, AttachmentCount = 1, PAttachments = &noBlend };
+            var blendAlpha = new PipelineColorBlendStateCreateInfo { SType = StructureType.PipelineColorBlendStateCreateInfo, AttachmentCount = 1, PAttachments = &alphaBlend };
+
+            var dyn = stackalloc DynamicState[2] { DynamicState.Viewport, DynamicState.Scissor };
+            var dynState = new PipelineDynamicStateCreateInfo { SType = StructureType.PipelineDynamicStateCreateInfo, DynamicStateCount = 2, PDynamicStates = dyn };
+
+            var push = new PushConstantRange(ShaderStageFlags.VertexBit | ShaderStageFlags.FragmentBit, 0, 80);
             var setLayout = _setLayout;
             var layoutInfo = new PipelineLayoutCreateInfo
             {
-                SType = StructureType.PipelineLayoutCreateInfo,
-                SetLayoutCount = 1, PSetLayouts = &setLayout,
-                PushConstantRangeCount = 1, PPushConstantRanges = &pushRange,
+                SType = StructureType.PipelineLayoutCreateInfo, SetLayoutCount = 1, PSetLayouts = &setLayout,
+                PushConstantRangeCount = 1, PPushConstantRanges = &push,
             };
             if (_vk.CreatePipelineLayout(_dev.Device, in layoutInfo, null, out _layout) != Result.Success)
                 throw new VulkanException("vkCreatePipelineLayout failed");
 
-            var info = new GraphicsPipelineCreateInfo
+            var baseInfo = new GraphicsPipelineCreateInfo
             {
-                SType = StructureType.GraphicsPipelineCreateInfo,
-                StageCount = 2, PStages = stages,
-                PVertexInputState = &vertexInput, PInputAssemblyState = &inputAssembly,
-                PViewportState = &viewportState, PRasterizationState = &raster,
-                PMultisampleState = &multisample, PDepthStencilState = &depthOn,
-                PColorBlendState = &blend, PDynamicState = &dynamic,
+                SType = StructureType.GraphicsPipelineCreateInfo, StageCount = 2, PStages = stages,
+                PVertexInputState = &vin, PInputAssemblyState = &ia, PViewportState = &vp, PRasterizationState = &rs,
+                PMultisampleState = &ms, PDynamicState = &dynState,
                 Layout = _layout, RenderPass = _renderPass, Subpass = 0,
             };
-            if (_vk.CreateGraphicsPipelines(_dev.Device, default, 1, in info, null, out _pipeline) != Result.Success)
-                throw new VulkanException("vkCreateGraphicsPipelines failed");
 
-            info.PDepthStencilState = &depthOff;
-            if (_vk.CreateGraphicsPipelines(_dev.Device, default, 1, in info, null, out _selectionPipeline) != Result.Success)
-                throw new VulkanException("vkCreateGraphicsPipelines (selection) failed");
+            var iOpaque = baseInfo; iOpaque.PDepthStencilState = &depthOn; iOpaque.PColorBlendState = &blendOpaque;
+            if (_vk.CreateGraphicsPipelines(_dev.Device, default, 1, in iOpaque, null, out _pipeline) != Result.Success)
+                throw new VulkanException("opaque pipeline failed");
+            var iTrans = baseInfo; iTrans.PDepthStencilState = &depthTestNoWrite; iTrans.PColorBlendState = &blendAlpha;
+            if (_vk.CreateGraphicsPipelines(_dev.Device, default, 1, in iTrans, null, out _translucentPipeline) != Result.Success)
+                throw new VulkanException("translucent pipeline failed");
+            var iSel = baseInfo; iSel.PDepthStencilState = &depthOff; iSel.PColorBlendState = &blendOpaque;
+            if (_vk.CreateGraphicsPipelines(_dev.Device, default, 1, in iSel, null, out _selectionPipeline) != Result.Success)
+                throw new VulkanException("selection pipeline failed");
         }
         finally
         {
@@ -539,154 +482,99 @@ public sealed unsafe class SceneRenderer : IDisposable
         }
     }
 
-    // ---- textures ----
+    // ---- images / buffers ----
 
-    private GpuTexture CreateTextureImage(byte[] rgba, uint w, uint h)
+    private GpuTexture CreateImage2D(byte[] data, uint w, uint h, Format format, int bpp)
     {
         var imgInfo = new ImageCreateInfo
         {
-            SType = StructureType.ImageCreateInfo, ImageType = ImageType.Type2D,
-            Format = Format.R8G8B8A8Unorm, Extent = new Extent3D(w, h, 1),
-            MipLevels = 1, ArrayLayers = 1, Samples = SampleCountFlags.Count1Bit,
-            Tiling = ImageTiling.Optimal,
-            Usage = ImageUsageFlags.TransferDstBit | ImageUsageFlags.SampledBit,
+            SType = StructureType.ImageCreateInfo, ImageType = ImageType.Type2D, Format = format,
+            Extent = new Extent3D(w, h, 1), MipLevels = 1, ArrayLayers = 1, Samples = SampleCountFlags.Count1Bit,
+            Tiling = ImageTiling.Optimal, Usage = ImageUsageFlags.TransferDstBit | ImageUsageFlags.SampledBit,
             SharingMode = SharingMode.Exclusive, InitialLayout = ImageLayout.Undefined,
         };
         if (_vk.CreateImage(_dev.Device, in imgInfo, null, out var image) != Result.Success)
-            throw new VulkanException("vkCreateImage (texture) failed");
+            throw new VulkanException("vkCreateImage failed");
         _vk.GetImageMemoryRequirements(_dev.Device, image, out var reqs);
-        var alloc = new MemoryAllocateInfo
-        {
-            SType = StructureType.MemoryAllocateInfo, AllocationSize = reqs.Size,
-            MemoryTypeIndex = _dev.FindMemoryType(reqs.MemoryTypeBits, MemoryPropertyFlags.DeviceLocalBit),
-        };
+        var alloc = new MemoryAllocateInfo { SType = StructureType.MemoryAllocateInfo, AllocationSize = reqs.Size, MemoryTypeIndex = _dev.FindMemoryType(reqs.MemoryTypeBits, MemoryPropertyFlags.DeviceLocalBit) };
         if (_vk.AllocateMemory(_dev.Device, in alloc, null, out var memory) != Result.Success)
-            throw new VulkanException("vkAllocateMemory (texture) failed");
+            throw new VulkanException("vkAllocateMemory (image) failed");
         _vk.BindImageMemory(_dev.Device, image, memory, 0);
 
-        var (staging, stagingMem) = CreateHostBuffer((ulong)rgba.Length, BufferUsageFlags.TransferSrcBit);
-        Upload(stagingMem, rgba);
+        var (staging, stagingMem) = CreateHostBuffer((ulong)(w * h * bpp), BufferUsageFlags.TransferSrcBit);
+        Upload(stagingMem, data);
 
         var cmd = BeginOneTimeCommands();
-        TransitionLayout(cmd, image, ImageLayout.Undefined, ImageLayout.TransferDstOptimal,
-            PipelineStageFlags.TopOfPipeBit, PipelineStageFlags.TransferBit,
-            0, AccessFlags.TransferWriteBit);
-        var copy = new BufferImageCopy
-        {
-            ImageSubresource = new ImageSubresourceLayers
-            {
-                AspectMask = ImageAspectFlags.ColorBit, MipLevel = 0, BaseArrayLayer = 0, LayerCount = 1,
-            },
-            ImageExtent = new Extent3D(w, h, 1),
-        };
+        Transition(cmd, image, ImageLayout.Undefined, ImageLayout.TransferDstOptimal, PipelineStageFlags.TopOfPipeBit, PipelineStageFlags.TransferBit, 0, AccessFlags.TransferWriteBit);
+        var copy = new BufferImageCopy { ImageSubresource = new ImageSubresourceLayers { AspectMask = ImageAspectFlags.ColorBit, LayerCount = 1 }, ImageExtent = new Extent3D(w, h, 1) };
         _vk.CmdCopyBufferToImage(cmd, staging, image, ImageLayout.TransferDstOptimal, 1, &copy);
-        TransitionLayout(cmd, image, ImageLayout.TransferDstOptimal, ImageLayout.ShaderReadOnlyOptimal,
-            PipelineStageFlags.TransferBit, PipelineStageFlags.FragmentShaderBit,
-            AccessFlags.TransferWriteBit, AccessFlags.ShaderReadBit);
+        Transition(cmd, image, ImageLayout.TransferDstOptimal, ImageLayout.ShaderReadOnlyOptimal, PipelineStageFlags.TransferBit, PipelineStageFlags.FragmentShaderBit, AccessFlags.TransferWriteBit, AccessFlags.ShaderReadBit);
         EndSubmitAndWait(cmd);
-
         _vk.DestroyBuffer(_dev.Device, staging, null);
         _vk.FreeMemory(_dev.Device, stagingMem, null);
 
-        var viewInfo = new ImageViewCreateInfo
-        {
-            SType = StructureType.ImageViewCreateInfo, Image = image,
-            ViewType = ImageViewType.Type2D, Format = Format.R8G8B8A8Unorm,
-            SubresourceRange = new ImageSubresourceRange(ImageAspectFlags.ColorBit, 0, 1, 0, 1),
-        };
+        var viewInfo = new ImageViewCreateInfo { SType = StructureType.ImageViewCreateInfo, Image = image, ViewType = ImageViewType.Type2D, Format = format, SubresourceRange = new ImageSubresourceRange(ImageAspectFlags.ColorBit, 0, 1, 0, 1) };
         if (_vk.CreateImageView(_dev.Device, in viewInfo, null, out var view) != Result.Success)
-            throw new VulkanException("vkCreateImageView (texture) failed");
-
+            throw new VulkanException("vkCreateImageView failed");
         return new GpuTexture { Image = image, Memory = memory, View = view };
     }
 
-    private void TransitionLayout(CommandBuffer cmd, Image image, ImageLayout oldL, ImageLayout newL,
-        PipelineStageFlags srcStage, PipelineStageFlags dstStage, AccessFlags srcAccess, AccessFlags dstAccess)
+    private void Transition(CommandBuffer cmd, Image image, ImageLayout oldL, ImageLayout newL, PipelineStageFlags src, PipelineStageFlags dst, AccessFlags srcA, AccessFlags dstA)
     {
-        var barrier = new ImageMemoryBarrier
+        var b = new ImageMemoryBarrier
         {
-            SType = StructureType.ImageMemoryBarrier,
-            OldLayout = oldL, NewLayout = newL,
+            SType = StructureType.ImageMemoryBarrier, OldLayout = oldL, NewLayout = newL,
             SrcQueueFamilyIndex = Vk.QueueFamilyIgnored, DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
-            Image = image, SrcAccessMask = srcAccess, DstAccessMask = dstAccess,
+            Image = image, SrcAccessMask = srcA, DstAccessMask = dstA,
             SubresourceRange = new ImageSubresourceRange(ImageAspectFlags.ColorBit, 0, 1, 0, 1),
         };
-        _vk.CmdPipelineBarrier(cmd, srcStage, dstStage, 0, 0, null, 0, null, 1, in barrier);
+        _vk.CmdPipelineBarrier(cmd, src, dst, 0, 0, null, 0, null, 1, in b);
     }
-
-    // ---- targets ----
 
     private void EnsureTargets(uint width, uint height)
     {
         if (width == _width && height == _height && _framebuffer.Handle != 0) return;
         DestroyTargets();
         _width = width; _height = height;
-
-        (_color, _colorMem, _colorView) = CreateAttachment(ColorFormat,
-            ImageUsageFlags.ColorAttachmentBit | ImageUsageFlags.TransferSrcBit, ImageAspectFlags.ColorBit);
-        (_depth, _depthMem, _depthView) = CreateAttachment(DepthFormat,
-            ImageUsageFlags.DepthStencilAttachmentBit, ImageAspectFlags.DepthBit);
-
+        (_color, _colorMem, _colorView) = CreateAttachment(ColorFormat, ImageUsageFlags.ColorAttachmentBit | ImageUsageFlags.TransferSrcBit, ImageAspectFlags.ColorBit);
+        (_depth, _depthMem, _depthView) = CreateAttachment(DepthFormat, ImageUsageFlags.DepthStencilAttachmentBit, ImageAspectFlags.DepthBit);
         var views = stackalloc ImageView[2] { _colorView, _depthView };
-        var fbInfo = new FramebufferCreateInfo
-        {
-            SType = StructureType.FramebufferCreateInfo, RenderPass = _renderPass,
-            AttachmentCount = 2, PAttachments = views, Width = _width, Height = _height, Layers = 1,
-        };
-        if (_vk.CreateFramebuffer(_dev.Device, in fbInfo, null, out _framebuffer) != Result.Success)
+        var fb = new FramebufferCreateInfo { SType = StructureType.FramebufferCreateInfo, RenderPass = _renderPass, AttachmentCount = 2, PAttachments = views, Width = _width, Height = _height, Layers = 1 };
+        if (_vk.CreateFramebuffer(_dev.Device, in fb, null, out _framebuffer) != Result.Success)
             throw new VulkanException("vkCreateFramebuffer failed");
         (_readback, _readbackMem) = CreateHostBuffer((ulong)(_width * _height * 4), BufferUsageFlags.TransferDstBit);
     }
 
     private (Image, DeviceMemory, ImageView) CreateAttachment(Format format, ImageUsageFlags usage, ImageAspectFlags aspect)
     {
-        var info = new ImageCreateInfo
-        {
-            SType = StructureType.ImageCreateInfo, ImageType = ImageType.Type2D, Format = format,
-            Extent = new Extent3D(_width, _height, 1), MipLevels = 1, ArrayLayers = 1,
-            Samples = SampleCountFlags.Count1Bit, Tiling = ImageTiling.Optimal, Usage = usage,
-            SharingMode = SharingMode.Exclusive, InitialLayout = ImageLayout.Undefined,
-        };
-        if (_vk.CreateImage(_dev.Device, in info, null, out var image) != Result.Success)
-            throw new VulkanException("vkCreateImage failed");
+        var info = new ImageCreateInfo { SType = StructureType.ImageCreateInfo, ImageType = ImageType.Type2D, Format = format, Extent = new Extent3D(_width, _height, 1), MipLevels = 1, ArrayLayers = 1, Samples = SampleCountFlags.Count1Bit, Tiling = ImageTiling.Optimal, Usage = usage, SharingMode = SharingMode.Exclusive, InitialLayout = ImageLayout.Undefined };
+        if (_vk.CreateImage(_dev.Device, in info, null, out var image) != Result.Success) throw new VulkanException("vkCreateImage failed");
         _vk.GetImageMemoryRequirements(_dev.Device, image, out var reqs);
-        var alloc = new MemoryAllocateInfo
-        {
-            SType = StructureType.MemoryAllocateInfo, AllocationSize = reqs.Size,
-            MemoryTypeIndex = _dev.FindMemoryType(reqs.MemoryTypeBits, MemoryPropertyFlags.DeviceLocalBit),
-        };
-        if (_vk.AllocateMemory(_dev.Device, in alloc, null, out var memory) != Result.Success)
-            throw new VulkanException("vkAllocateMemory failed");
+        var alloc = new MemoryAllocateInfo { SType = StructureType.MemoryAllocateInfo, AllocationSize = reqs.Size, MemoryTypeIndex = _dev.FindMemoryType(reqs.MemoryTypeBits, MemoryPropertyFlags.DeviceLocalBit) };
+        if (_vk.AllocateMemory(_dev.Device, in alloc, null, out var memory) != Result.Success) throw new VulkanException("vkAllocateMemory failed");
         _vk.BindImageMemory(_dev.Device, image, memory, 0);
-        var viewInfo = new ImageViewCreateInfo
-        {
-            SType = StructureType.ImageViewCreateInfo, Image = image, ViewType = ImageViewType.Type2D,
-            Format = format, SubresourceRange = new ImageSubresourceRange(aspect, 0, 1, 0, 1),
-        };
-        if (_vk.CreateImageView(_dev.Device, in viewInfo, null, out var view) != Result.Success)
-            throw new VulkanException("vkCreateImageView failed");
+        var viewInfo = new ImageViewCreateInfo { SType = StructureType.ImageViewCreateInfo, Image = image, ViewType = ImageViewType.Type2D, Format = format, SubresourceRange = new ImageSubresourceRange(aspect, 0, 1, 0, 1) };
+        if (_vk.CreateImageView(_dev.Device, in viewInfo, null, out var view) != Result.Success) throw new VulkanException("vkCreateImageView failed");
         return (image, memory, view);
     }
 
-    // ---- helpers ----
+    private void UploadGeometry(RenderScene scene)
+    {
+        var verts = scene.Mesh.Vertices.ToArray();
+        var indices = scene.Mesh.Indices.ToArray();
+        (_vertexBuffer, _vertexMemory) = CreateHostBuffer((ulong)(verts.Length * (int)MeshVertex.Stride), BufferUsageFlags.VertexBufferBit);
+        Upload(_vertexMemory, MemoryMarshal.AsBytes<MeshVertex>(verts));
+        (_indexBuffer, _indexMemory) = CreateHostBuffer((ulong)(indices.Length * sizeof(uint)), BufferUsageFlags.IndexBufferBit);
+        Upload(_indexMemory, MemoryMarshal.AsBytes<uint>(indices));
+    }
 
     private (VkBuffer, DeviceMemory) CreateHostBuffer(ulong size, BufferUsageFlags usage)
     {
-        var info = new BufferCreateInfo
-        {
-            SType = StructureType.BufferCreateInfo, Size = size, Usage = usage, SharingMode = SharingMode.Exclusive,
-        };
-        if (_vk.CreateBuffer(_dev.Device, in info, null, out var buffer) != Result.Success)
-            throw new VulkanException("vkCreateBuffer failed");
+        var info = new BufferCreateInfo { SType = StructureType.BufferCreateInfo, Size = size, Usage = usage, SharingMode = SharingMode.Exclusive };
+        if (_vk.CreateBuffer(_dev.Device, in info, null, out var buffer) != Result.Success) throw new VulkanException("vkCreateBuffer failed");
         _vk.GetBufferMemoryRequirements(_dev.Device, buffer, out var reqs);
-        var alloc = new MemoryAllocateInfo
-        {
-            SType = StructureType.MemoryAllocateInfo, AllocationSize = reqs.Size,
-            MemoryTypeIndex = _dev.FindMemoryType(reqs.MemoryTypeBits,
-                MemoryPropertyFlags.HostVisibleBit | MemoryPropertyFlags.HostCoherentBit),
-        };
-        if (_vk.AllocateMemory(_dev.Device, in alloc, null, out var memory) != Result.Success)
-            throw new VulkanException("vkAllocateMemory (buffer) failed");
+        var alloc = new MemoryAllocateInfo { SType = StructureType.MemoryAllocateInfo, AllocationSize = reqs.Size, MemoryTypeIndex = _dev.FindMemoryType(reqs.MemoryTypeBits, MemoryPropertyFlags.HostVisibleBit | MemoryPropertyFlags.HostCoherentBit) };
+        if (_vk.AllocateMemory(_dev.Device, in alloc, null, out var memory) != Result.Success) throw new VulkanException("vkAllocateMemory (buffer) failed");
         _vk.BindBufferMemory(_dev.Device, buffer, memory, 0);
         return (buffer, memory);
     }
@@ -702,37 +590,24 @@ public sealed unsafe class SceneRenderer : IDisposable
     private ShaderModule LoadShaderModule(string nameSuffix)
     {
         var asm = typeof(SceneRenderer).GetTypeInfo().Assembly;
-        var resourceName = asm.GetManifestResourceNames()
-            .FirstOrDefault(n => n.EndsWith(nameSuffix, StringComparison.Ordinal))
-            ?? throw new VulkanException($"Embedded shader '{nameSuffix}' not found");
-        using var stream = asm.GetManifestResourceStream(resourceName)!;
+        var name = asm.GetManifestResourceNames().FirstOrDefault(n => n.EndsWith(nameSuffix, StringComparison.Ordinal)) ?? throw new VulkanException($"shader '{nameSuffix}' not found");
+        using var stream = asm.GetManifestResourceStream(name)!;
         using var ms = new MemoryStream();
         stream.CopyTo(ms);
         var code = ms.ToArray();
-        fixed (byte* pCode = code)
+        fixed (byte* p = code)
         {
-            var info = new ShaderModuleCreateInfo
-            {
-                SType = StructureType.ShaderModuleCreateInfo, CodeSize = (nuint)code.Length, PCode = (uint*)pCode,
-            };
-            if (_vk.CreateShaderModule(_dev.Device, in info, null, out var module) != Result.Success)
-                throw new VulkanException($"vkCreateShaderModule failed for {nameSuffix}");
+            var info = new ShaderModuleCreateInfo { SType = StructureType.ShaderModuleCreateInfo, CodeSize = (nuint)code.Length, PCode = (uint*)p };
+            if (_vk.CreateShaderModule(_dev.Device, in info, null, out var module) != Result.Success) throw new VulkanException($"vkCreateShaderModule {nameSuffix}");
             return module;
         }
     }
 
     private CommandBuffer BeginOneTimeCommands()
     {
-        var allocInfo = new CommandBufferAllocateInfo
-        {
-            SType = StructureType.CommandBufferAllocateInfo,
-            CommandPool = _dev.CommandPool, Level = CommandBufferLevel.Primary, CommandBufferCount = 1,
-        };
-        _vk.AllocateCommandBuffers(_dev.Device, in allocInfo, out var cmd);
-        var begin = new CommandBufferBeginInfo
-        {
-            SType = StructureType.CommandBufferBeginInfo, Flags = CommandBufferUsageFlags.OneTimeSubmitBit,
-        };
+        var alloc = new CommandBufferAllocateInfo { SType = StructureType.CommandBufferAllocateInfo, CommandPool = _dev.CommandPool, Level = CommandBufferLevel.Primary, CommandBufferCount = 1 };
+        _vk.AllocateCommandBuffers(_dev.Device, in alloc, out var cmd);
+        var begin = new CommandBufferBeginInfo { SType = StructureType.CommandBufferBeginInfo, Flags = CommandBufferUsageFlags.OneTimeSubmitBit };
         _vk.BeginCommandBuffer(cmd, in begin);
         return cmd;
     }
@@ -740,14 +615,10 @@ public sealed unsafe class SceneRenderer : IDisposable
     private void EndSubmitAndWait(CommandBuffer cmd)
     {
         _vk.EndCommandBuffer(cmd);
-        var fenceInfo = new FenceCreateInfo { SType = StructureType.FenceCreateInfo };
-        _vk.CreateFence(_dev.Device, in fenceInfo, null, out var fence);
-        var submit = new SubmitInfo
-        {
-            SType = StructureType.SubmitInfo, CommandBufferCount = 1, PCommandBuffers = &cmd,
-        };
-        if (_vk.QueueSubmit(_dev.GraphicsQueue, 1, in submit, fence) != Result.Success)
-            throw new VulkanException("vkQueueSubmit failed");
+        var fi = new FenceCreateInfo { SType = StructureType.FenceCreateInfo };
+        _vk.CreateFence(_dev.Device, in fi, null, out var fence);
+        var submit = new SubmitInfo { SType = StructureType.SubmitInfo, CommandBufferCount = 1, PCommandBuffers = &cmd };
+        if (_vk.QueueSubmit(_dev.GraphicsQueue, 1, in submit, fence) != Result.Success) throw new VulkanException("vkQueueSubmit failed");
         _vk.WaitForFences(_dev.Device, 1, in fence, true, ulong.MaxValue);
         _vk.DestroyFence(_dev.Device, fence, null);
         _vk.FreeCommandBuffers(_dev.Device, _dev.CommandPool, 1, in cmd);
@@ -768,26 +639,6 @@ public sealed unsafe class SceneRenderer : IDisposable
         if (_descPool.Handle != 0) { _vk.DestroyDescriptorPool(_dev.Device, _descPool, null); _descPool = default; }
     }
 
-    private void DestroySelection()
-    {
-        var d = _dev.Device;
-        if (_selVertexBuffer.Handle != 0) { _vk.DestroyBuffer(d, _selVertexBuffer, null); _selVertexBuffer = default; }
-        if (_selVertexMemory.Handle != 0) { _vk.FreeMemory(d, _selVertexMemory, null); _selVertexMemory = default; }
-        if (_selIndexBuffer.Handle != 0) { _vk.DestroyBuffer(d, _selIndexBuffer, null); _selIndexBuffer = default; }
-        if (_selIndexMemory.Handle != 0) { _vk.FreeMemory(d, _selIndexMemory, null); _selIndexMemory = default; }
-        _selIndexCount = 0;
-    }
-
-    private void DestroyMarkers()
-    {
-        var d = _dev.Device;
-        if (_markerVertexBuffer.Handle != 0) { _vk.DestroyBuffer(d, _markerVertexBuffer, null); _markerVertexBuffer = default; }
-        if (_markerVertexMemory.Handle != 0) { _vk.FreeMemory(d, _markerVertexMemory, null); _markerVertexMemory = default; }
-        if (_markerIndexBuffer.Handle != 0) { _vk.DestroyBuffer(d, _markerIndexBuffer, null); _markerIndexBuffer = default; }
-        if (_markerIndexMemory.Handle != 0) { _vk.FreeMemory(d, _markerIndexMemory, null); _markerIndexMemory = default; }
-        _markerIndexCount = 0;
-    }
-
     private void DestroyGeometryBuffers()
     {
         var d = _dev.Device;
@@ -803,7 +654,7 @@ public sealed unsafe class SceneRenderer : IDisposable
         _sceneTextures.Clear();
         _draws.Clear();
         _materialCache.Clear();
-        DestroyDescriptorPool(); // frees all descriptor sets (incl. white's)
+        DestroyDescriptorPool();
         DestroyGeometryBuffers();
     }
 
@@ -824,12 +675,17 @@ public sealed unsafe class SceneRenderer : IDisposable
     public void Dispose()
     {
         DestroyScene();
-        DestroySelection();
-        DestroyMarkers();
+        var d = _dev.Device;
+        foreach (var b in new[] { _selVertexBuffer, _selIndexBuffer, _markerVertexBuffer, _markerIndexBuffer })
+            if (b.Handle != 0) _vk.DestroyBuffer(d, b, null);
+        foreach (var m in new[] { _selVertexMemory, _selIndexMemory, _markerVertexMemory, _markerIndexMemory })
+            if (m.Handle != 0) _vk.FreeMemory(d, m, null);
         DestroyTargets();
         DestroyTexture(_white);
-        var d = _dev.Device;
+        DestroyTexture(_palette);
+        DestroyTexture(_lightRamp);
         if (_selectionPipeline.Handle != 0) _vk.DestroyPipeline(d, _selectionPipeline, null);
+        if (_translucentPipeline.Handle != 0) _vk.DestroyPipeline(d, _translucentPipeline, null);
         if (_pipeline.Handle != 0) _vk.DestroyPipeline(d, _pipeline, null);
         if (_layout.Handle != 0) _vk.DestroyPipelineLayout(d, _layout, null);
         if (_setLayout.Handle != 0) _vk.DestroyDescriptorSetLayout(d, _setLayout, null);

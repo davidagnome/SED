@@ -8,6 +8,9 @@ public sealed class Vertex
     public Vec3 Position;
     public Sector? Sector;
 
+    /// <summary>Index into the file's global WORLD VERTICES list (-1 if not loaded from JKL).</summary>
+    public int SourceIndex = -1;
+
     public Vertex() { }
     public Vertex(Vec3 position) => Position = position;
 }

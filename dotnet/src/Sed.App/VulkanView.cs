@@ -81,7 +81,8 @@ public sealed class VulkanView : Control
 
     private List<Thing> _markerThings = new();
 
-    public void SetLevel(Level level, TextureLookup? textures = null, Func<string, ThreeDoModel?>? models = null)
+    public void SetLevel(Level level, TextureLookup? textures = null, Func<string, ThreeDoModel?>? models = null,
+        byte[]? paletteRgb = null, byte[]? lightTable = null)
     {
         if (_renderer is null) return;
         _level = level;
@@ -93,6 +94,9 @@ public sealed class VulkanView : Control
         _activeSector = null;
         _renderer.SetSelection(null);
         History.Clear();
+
+        if (paletteRgb is not null && lightTable is not null)
+            _renderer.SetColormap(paletteRgb, lightTable);
 
         if (textures is not null)
         {

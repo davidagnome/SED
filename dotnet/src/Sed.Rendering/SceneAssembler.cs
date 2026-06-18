@@ -12,19 +12,21 @@ namespace Sed.Rendering;
 /// </summary>
 public sealed class SceneAssembler
 {
-    private const float LightBias = 0.65f, LightScale = 0.6f;
-    private static readonly ColorF ModelLight = new(0.85f, 0.85f, 0.85f);
+    /// <summary>Constant light for 3DO model surfaces (they aren't sector-lit here).</summary>
+    private const float ModelLight = 0.8f;
 
-    private readonly Dictionary<string, Mesh> _byMaterial = new(StringComparer.OrdinalIgnoreCase);
+    private readonly record struct Batch(string Material, bool Translucent);
+    private readonly Dictionary<Batch, Mesh> _byBatch = new();
 
-    private Mesh For(string material)
+    private Mesh For(string material, bool translucent)
     {
-        if (!_byMaterial.TryGetValue(material, out var mesh))
-            _byMaterial[material] = mesh = new Mesh();
+        var key = new Batch(material, translucent);
+        if (!_byBatch.TryGetValue(key, out var mesh))
+            _byBatch[key] = mesh = new Mesh();
         return mesh;
     }
 
-    /// <summary>Adds the level's textured surfaces (skipping no-material adjoin/sky portals).</summary>
+    /// <summary>Adds the level's textured surfaces (skipping no-material adjoin portals).</summary>
     public void AddLevel(Level level)
     {
         foreach (var sector in level.Sectors)
@@ -33,10 +35,11 @@ public sealed class SceneAssembler
             if (surface.Corners.Count < 3 || string.IsNullOrEmpty(surface.Material)) continue;
             surface.RecalcNormal();
             var n = surface.Normal;
-            var mesh = For(surface.Material);
+            var mesh = For(surface.Material, surface.IsTranslucent);
+            float sky = surface.IsSky ? 1f : -1f; // -1 => use per-vertex intensity
             var c0 = surface.Corners[0];
             for (int i = 1; i + 1 < surface.Corners.Count; i++)
-                mesh.AddTriangle(SurfVertex(c0, n), SurfVertex(surface.Corners[i], n), SurfVertex(surface.Corners[i + 1], n));
+                mesh.AddTriangle(SurfVertex(c0, n, sky), SurfVertex(surface.Corners[i], n, sky), SurfVertex(surface.Corners[i + 1], n, sky));
         }
     }
 
@@ -92,7 +95,8 @@ public sealed class SceneAssembler
         foreach (var face in mesh.Faces)
         {
             if (face.VertexIndices.Count < 3) continue;
-            var target = For(model.GetMaterial(face.Material));
+            var target = For(model.GetMaterial(face.Material), false);
+            var light = new ColorF(ModelLight, ModelLight, ModelLight);
 
             var p0 = world.TransformPoint(Vert(mesh, face, 0));
             for (int k = 1; k + 1 < face.VertexIndices.Count; k++)
@@ -101,9 +105,9 @@ public sealed class SceneAssembler
                 var pj = world.TransformPoint(Vert(mesh, face, k + 1));
                 var n = (pi - p0).Cross(pj - p0).Normalized();
                 target.AddTriangle(
-                    new MeshVertex(p0, n, ModelLight, U(mesh, face, 0), V(mesh, face, 0)),
-                    new MeshVertex(pi, n, ModelLight, U(mesh, face, k), V(mesh, face, k)),
-                    new MeshVertex(pj, n, ModelLight, U(mesh, face, k + 1), V(mesh, face, k + 1)));
+                    new MeshVertex(p0, n, light, U(mesh, face, 0), V(mesh, face, 0)),
+                    new MeshVertex(pi, n, light, U(mesh, face, k), V(mesh, face, k)),
+                    new MeshVertex(pj, n, light, U(mesh, face, k + 1), V(mesh, face, k + 1)));
             }
         }
     }
@@ -127,23 +131,29 @@ public sealed class SceneAssembler
     public RenderScene Build()
     {
         var scene = new RenderScene();
-        foreach (var (material, mesh) in _byMaterial)
+        // Opaque first, then translucent, so the renderer can order passes by list order.
+        foreach (var (batch, mesh) in _byBatch.OrderBy(kv => kv.Key.Translucent))
         {
             if (mesh.IsEmpty) continue;
             uint baseVertex = (uint)scene.Mesh.Vertices.Count;
             int indexOffset = scene.Mesh.Indices.Count;
             scene.Mesh.Vertices.AddRange(mesh.Vertices);
             foreach (var idx in mesh.Indices) scene.Mesh.Indices.Add(idx + baseVertex);
-            scene.Submeshes.Add(new Submesh { Material = material, IndexOffset = indexOffset, IndexCount = mesh.Indices.Count });
+            scene.Submeshes.Add(new Submesh
+            {
+                Material = batch.Material,
+                IndexOffset = indexOffset,
+                IndexCount = mesh.Indices.Count,
+                Translucent = batch.Translucent,
+            });
         }
         return scene;
     }
 
-    private static MeshVertex SurfVertex(Surface.Corner c, Vec3 normal)
+    /// <summary>Per-vertex light intensity is carried in the color channel (0..1); sky is full bright.</summary>
+    private static MeshVertex SurfVertex(Surface.Corner c, Vec3 normal, float skyOverride)
     {
-        var lit = new ColorF(Light(c.Intensity.R), Light(c.Intensity.G), Light(c.Intensity.B));
-        return new MeshVertex(c.Vertex.Position, normal, lit, c.Uv.U, c.Uv.V);
+        float i = skyOverride >= 0 ? skyOverride : c.Intensity.R;
+        return new MeshVertex(c.Vertex.Position, normal, new ColorF(i, i, i), c.Uv.U, c.Uv.V);
     }
-
-    private static float Light(float intensity) => System.Math.Clamp(LightBias + intensity * LightScale, 0f, 1.4f);
 }

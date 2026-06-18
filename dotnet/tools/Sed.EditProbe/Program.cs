@@ -12,16 +12,18 @@ foreach (var sector in level.Sectors)
     foreach (var surf in sector.Surfaces)
         surf.Material = "grid"; // give faces a material so the textured path includes them
 
-// 4x4 checker texture so the surface and its deformation are clearly visible.
-var rgba = new byte[4 * 4 * 4];
+// 4x4 checker of two palette indices so the surface + deformation are visible.
+var indices = new byte[4 * 4];
 for (int y = 0; y < 4; y++)
     for (int x = 0; x < 4; x++)
-    {
-        byte c = (byte)(((x + y) & 1) == 0 ? 230 : 90);
-        int i = (y * 4 + x) * 4;
-        rgba[i] = c; rgba[i + 1] = c; rgba[i + 2] = (byte)(c / 2 + 80); rgba[i + 3] = 255;
-    }
-TextureData? Lookup(string m) => new TextureData(4, 4, rgba);
+        indices[y * 4 + x] = (byte)(((x + y) & 1) == 0 ? 200 : 100);
+IndexedTexture? Lookup(string m) => new IndexedTexture(4, 4, indices);
+
+// Synthetic palette (grayscale) + identity light ramp.
+var palRgb = new byte[256 * 3];
+for (int i = 0; i < 256; i++) { palRgb[i * 3] = (byte)i; palRgb[i * 3 + 1] = (byte)i; palRgb[i * 3 + 2] = (byte)i; }
+var ramp = new byte[64 * 256];
+for (int l = 0; l < 64; l++) for (int i = 0; i < 256; i++) ramp[l * 256 + i] = (byte)i;
 
 var camera = Camera.LookingAt(new Vec3(4, -5, 3.5), Vec3.Zero);
 var mvp = camera.ViewProjection((double)W / H);
@@ -30,6 +32,7 @@ using var ctx = VulkanContext.Create("SED EditProbe");
 using var device = VulkanDevice.Create(ctx);
 using var renderer = new SceneRenderer(device);
 
+renderer.SetColormap(palRgb, ramp);
 var assembler = new SceneAssembler();
 assembler.AddLevel(level);
 renderer.SetScene(assembler.Build(), Lookup);

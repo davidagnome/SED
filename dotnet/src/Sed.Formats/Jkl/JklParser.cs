@@ -23,7 +23,17 @@ public static class JklParser
         return Parse(sr);
     }
 
-    public static Level Parse(TextReader reader)
+    /// <summary>Parses while recording the original text + line mappings for editable round-trip saving.</summary>
+    public static JklDocument ParseDocument(string text)
+    {
+        var doc = new JklDocument(SplitLines(text));
+        doc.Level = Parse(new StringReader(text), doc);
+        return doc;
+    }
+
+    public static Level Parse(TextReader reader) => Parse(reader, null);
+
+    private static Level Parse(TextReader reader, JklDocument? doc)
     {
         var level = new Level();
         var r = new JklReader(reader);
@@ -40,10 +50,10 @@ public static class JklParser
             {
                 case "HEADER": LoadHeader(r, level); break;
                 case "MATERIALS": LoadMaterials(r, geo); break;
-                case "GEORESOURCE": LoadGeometry(r, level, geo); break;
+                case "GEORESOURCE": LoadGeometry(r, level, geo, doc); break;
                 case "SECTORS": LoadSectors(r, level, geo); break;
                 case "TEMPLATES": LoadTemplates(r, level); break;
-                case "THINGS": LoadThings(r, level); break;
+                case "THINGS": LoadThings(r, level, doc); break;
                 default: r.SkipToNextSection(); break;
             }
         }
@@ -51,6 +61,9 @@ public static class JklParser
         PostProcess(level);
         return level;
     }
+
+    internal static string[] SplitLines(string text) =>
+        text.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
 
     // ---- HEADER ----
 
@@ -91,7 +104,7 @@ public static class JklParser
 
     // ---- GEORESOURCE ----
 
-    private static void LoadGeometry(JklReader r, Level level, GeoData geo)
+    private static void LoadGeometry(JklReader r, Level level, GeoData geo, JklDocument? doc)
     {
         bool ijim = level.Kind == ProjectType.InfernalMachine;
 
@@ -115,10 +128,12 @@ public static class JklParser
         {
             r.Next();
             var t = JklReader.Tokens(JklReader.StripIndex(r.Current));
-            geo.Vertices.Add(new Vec3(
+            var pos = new Vec3(
                 JklReader.ParseFloat(t.ElementAtOrDefault(0) ?? "0"),
                 JklReader.ParseFloat(t.ElementAtOrDefault(1) ?? "0"),
-                JklReader.ParseFloat(t.ElementAtOrDefault(2) ?? "0")));
+                JklReader.ParseFloat(t.ElementAtOrDefault(2) ?? "0"));
+            geo.Vertices.Add(pos);
+            if (doc is not null) { doc.VertexLine[i] = r.LineNumber - 1; doc.VertexOriginal[i] = pos; }
         }
 
         // Texture vertices: "i: u v"
@@ -270,6 +285,7 @@ public static class JklParser
             var surf = sector.NewSurface();
             surf.Material = geo.GetMaterial(ts.Material);
             surf.SurfFlags = ts.SurfFlags;
+            surf.FaceFlags = ts.FaceFlags;
 
             for (int j = 0; j < ts.Vxs.Count; j++)
             {
@@ -278,6 +294,7 @@ public static class JklParser
                 {
                     var pos = (uint)gidx < (uint)geo.Vertices.Count ? geo.Vertices[gidx] : Vec3.Zero;
                     vertex = sector.AddVertex(pos);
+                    vertex.SourceIndex = gidx;
                     globalToLocal[gidx] = vertex;
                 }
 
@@ -317,7 +334,7 @@ public static class JklParser
 
     // ---- THINGS ----
 
-    private static void LoadThings(JklReader r, Level level)
+    private static void LoadThings(JklReader r, Level level, JklDocument? doc)
     {
         if (!r.Next()) return;
         int n = LastInt(r.Current);
@@ -328,6 +345,7 @@ public static class JklParser
             if (t.Length < 10) continue;
 
             var thing = level.NewThing();
+            if (doc is not null) doc.ThingLine[thing.Num] = r.LineNumber - 1;
             // t[0]=index, t[1]=template, t[2]=name, t[3..5]=xyz, t[6..8]=pyr, t[9]=sector
             thing.Template = t[1];
             thing.Name = t[2];

@@ -41,12 +41,13 @@ var unmodeled = assembler.AddThings(level, modelLib.Get);
 var scene = assembler.Build();
 Console.WriteLine($"  things with models: {level.Things.Count - unmodeled.Count}/{level.Things.Count}, " +
                   $"submeshes={scene.Submeshes.Count}, tris={scene.Mesh.Indices.Count / 3}");
-TextureData? Lookup(string m) { var t = library.Get(m); return t is { } r ? new TextureData(r.Width, r.Height, r.Rgba) : null; }
+IndexedTexture? Lookup(string m) { var t = library.GetIndexed(m); return t is { } r ? new IndexedTexture(r.Width, r.Height, r.Indices) : null; }
 
 const uint W = 720, H = 540;
 using var ctx = VulkanContext.Create("SED Interior");
 using var device = VulkanDevice.Create(ctx);
 using var renderer = new SceneRenderer(device);
+renderer.SetColormap(palette.PaletteRgb, palette.LightTable);
 renderer.SetScene(scene, Lookup);
 
 // Look at the anchor thing from a few offset distances so nearby models are framed.

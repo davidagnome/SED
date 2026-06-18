@@ -16,10 +16,23 @@ public sealed class Surface
         public ColorF Intensity = ColorF.White;
     }
 
+    // Surface flags (SF_*)
+    public const long SfSkyHorizon = 0x200;
+    public const long SfSkyCeiling = 0x400;
+    // Face flags (FF_*)
+    public const long FfTranslucent = 0x02;
+
     public int Num;
     public long SurfFlags;
+    public long FaceFlags;
     public string Material = string.Empty;
     public int MaterialIndex = -1;
+
+    /// <summary>True if this surface is a sky (horizon or ceiling) surface.</summary>
+    public bool IsSky => (SurfFlags & (SfSkyHorizon | SfSkyCeiling)) != 0;
+
+    /// <summary>True if this surface uses alpha blending.</summary>
+    public bool IsTranslucent => (FaceFlags & FfTranslucent) != 0;
 
     public Surface? Adjoin;
     public long AdjoinFlags;

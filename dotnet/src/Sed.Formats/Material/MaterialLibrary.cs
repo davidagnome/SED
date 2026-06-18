@@ -5,6 +5,9 @@ namespace Sed.Formats.Material;
 /// <summary>RGBA8 pixels for a resolved material.</summary>
 public readonly record struct ResolvedTexture(int Width, int Height, byte[] Rgba);
 
+/// <summary>8-bit palette-indexed pixels for a resolved material.</summary>
+public readonly record struct IndexedMaterial(int Width, int Height, byte[] Indices);
+
 /// <summary>
 /// Resolves JKL material names (e.g. "wall01.mat") to RGBA textures by locating
 /// the MAT in one or more resource GOBs and applying a CMP palette. Results are
@@ -15,6 +18,9 @@ public sealed class MaterialLibrary
     private readonly GobArchive[] _archives;
     private readonly Colormap _palette;
     private readonly Dictionary<string, ResolvedTexture?> _cache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, IndexedMaterial?> _indexCache = new(StringComparer.OrdinalIgnoreCase);
+
+    public Colormap Palette => _palette;
 
     public MaterialLibrary(Colormap palette, params GobArchive[] archives)
     {
@@ -60,6 +66,35 @@ public sealed class MaterialLibrary
         }
 
         _cache[material] = result;
+        return result;
+    }
+
+    /// <summary>Resolves a material to 8-bit palette indices (for GPU palette+lighting).</summary>
+    public IndexedMaterial? GetIndexed(string material)
+    {
+        if (string.IsNullOrWhiteSpace(material)) return null;
+        if (_indexCache.TryGetValue(material, out var cached)) return cached;
+
+        IndexedMaterial? result = null;
+        try
+        {
+            foreach (var gob in _archives)
+            {
+                var entry = gob.Find(material);
+                if (entry is null) continue;
+                var mat = MatFile.Read(gob.ReadBytes(entry));
+                result = mat.IsColor
+                    ? new IndexedMaterial(1, 1, new[] { (byte)(mat.ColorIndex & 0xFF) })
+                    : new IndexedMaterial(mat.Width, mat.Height, mat.Indices);
+                break;
+            }
+        }
+        catch
+        {
+            result = null;
+        }
+
+        _indexCache[material] = result;
         return result;
     }
 }

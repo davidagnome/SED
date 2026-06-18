@@ -35,11 +35,11 @@ var library = new MaterialLibrary(palette, resGob);
 
 var scene = SceneBuilder.BuildScene(level);
 int withTex = 0, total = 0;
-TextureData? Lookup(string material)
+IndexedTexture? Lookup(string material)
 {
     total++;
-    var t = library.Get(material);
-    if (t is { } r) { withTex++; return new TextureData(r.Width, r.Height, r.Rgba); }
+    var t = library.GetIndexed(material);
+    if (t is { } r) { withTex++; return new IndexedTexture(r.Width, r.Height, r.Indices); }
     return null;
 }
 
@@ -52,6 +52,7 @@ var mvp = camera.ViewProjection((double)W / H);
 using var ctx = VulkanContext.Create("SED LevelRender");
 using var device = VulkanDevice.Create(ctx);
 using var renderer = new SceneRenderer(device);
+renderer.SetColormap(palette.PaletteRgb, palette.LightTable);
 renderer.SetScene(scene, Lookup);
 Console.WriteLine($"  submeshes={scene.Submeshes.Count}, materials resolved {withTex}/{total}");
 
