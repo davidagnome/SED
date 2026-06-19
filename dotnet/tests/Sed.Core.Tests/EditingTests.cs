@@ -105,6 +105,43 @@ public class TransformTests
     }
 }
 
+public class LightingTests
+{
+    [Fact]
+    public void SetSectorAmbient_AppliesAndReverts()
+    {
+        var level = new Level();
+        var sec = level.NewSector();
+        sec.Ambient = new ColorF(0.2f, 0.2f, 0.2f);
+        var cmd = SetSectorAmbientCommand.Adjust(sec, 0.3f);
+        cmd.Apply();
+        Assert.Equal(0.5f, sec.Ambient.R, 4);
+        cmd.Revert();
+        Assert.Equal(0.2f, sec.Ambient.R, 4);
+    }
+
+    [Fact]
+    public void SetVertexLight_ChangesCorners_AndReverts()
+    {
+        var level = SampleScene.CreateCube();
+        var sec = level.Sectors[0];
+        foreach (var s in sec.Surfaces)
+            foreach (var c in s.Corners) c.Intensity = new ColorF(0.4f, 0.4f, 0.4f);
+        var v = sec.Vertices[0];
+
+        var cmd = SetVertexLightCommand.Adjust(sec, v, 0.5f);
+        cmd.Apply();
+        foreach (var s in sec.Surfaces)
+            foreach (var c in s.Corners)
+                if (c.Vertex == v) Assert.Equal(0.9f, c.Intensity.R, 4);
+
+        cmd.Revert();
+        foreach (var s in sec.Surfaces)
+            foreach (var c in s.Corners)
+                if (c.Vertex == v) Assert.Equal(0.4f, c.Intensity.R, 4);
+    }
+}
+
 public class GeometryEditTests
 {
     [Fact]

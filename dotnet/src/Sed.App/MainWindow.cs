@@ -25,7 +25,10 @@ public class MainWindow : Window
     private readonly TextBlock _status;
     private readonly VulkanView _view;
     private readonly ListBox _levelList;
+    private readonly ListBox _materialList;
     private readonly TextBlock _sidePanelHeader;
+    private Sed.Formats.Material.MaterialLibrary? _matLibrary;
+    private List<MaterialThumb> _matThumbs = new();
 
     // Active session (whichever source is open).
     private GameInstall? _install;
@@ -58,6 +61,9 @@ public class MainWindow : Window
         _levelList = new ListBox { Background = Brushes.Transparent };
         _levelList.SelectionChanged += (_, _) => OnLevelSelected();
 
+        _materialList = new ListBox { Background = Brushes.Transparent, ItemTemplate = MaterialItemTemplate() };
+        _materialList.SelectionChanged += (_, _) => OnMaterialPicked();
+
         var root = new DockPanel();
         var menu = BuildMenu();
         DockPanel.SetDock(menu, Dock.Top);
@@ -77,6 +83,16 @@ public class MainWindow : Window
         var sidePanel = new Border { Background = new SolidColorBrush(Color.FromRgb(0x1e, 0x1e, 0x22)), Child = sideContent };
         DockPanel.SetDock(sidePanel, Dock.Left);
         root.Children.Add(sidePanel);
+
+        // Right: material inspector (click a material to assign to the selected surface).
+        var matContent = new DockPanel { Width = 200 };
+        var matHeader = new TextBlock { Margin = new Thickness(10, 8), Text = "Materials — click to assign", Foreground = Brushes.Gray };
+        DockPanel.SetDock(matHeader, Dock.Top);
+        matContent.Children.Add(matHeader);
+        matContent.Children.Add(_materialList);
+        var matPanel = new Border { Background = new SolidColorBrush(Color.FromRgb(0x1e, 0x1e, 0x22)), Child = matContent };
+        DockPanel.SetDock(matPanel, Dock.Right);
+        root.Children.Add(matPanel);
 
         root.Children.Add(_view);
         Content = root;
@@ -247,6 +263,7 @@ public class MainWindow : Window
             {
                 var colormap = MaterialLibrary.LoadPalette(level.ColorMaps, _materialArchives);
                 var library = new MaterialLibrary(colormap, _materialArchives);
+                _matLibrary = library;
                 paletteRgb = colormap.PaletteRgb;
                 lightTable = colormap.LightTable;
                 textures = material =>
@@ -262,9 +279,68 @@ public class MainWindow : Window
 
         _view.Materials = _currentDoc?.Materials ?? new List<string>();
         _view.SetLevel(level, textures, models, paletteRgb, lightTable);
+        PopulateMaterials();
         int surfaces = level.Sectors.Sum(s => s.Surfaces.Count);
         _status.Text = $"{name} — {level.Sectors.Count} sectors, {surfaces} surfaces, " +
                        $"{level.Things.Count} things ({(textures is null ? "untextured" : "textured")})";
+    }
+
+    // ---- material inspector ----
+
+    private sealed class MaterialThumb
+    {
+        public string Name { get; init; } = string.Empty;
+        public int Index { get; init; }
+        public Avalonia.Media.Imaging.Bitmap? Image { get; init; }
+    }
+
+    private static Avalonia.Controls.Templates.IDataTemplate MaterialItemTemplate() =>
+        new Avalonia.Controls.Templates.FuncDataTemplate<MaterialThumb>((m, _) =>
+        {
+            var img = new Image { Width = 32, Height = 32, Source = m?.Image, Stretch = Stretch.Fill };
+            var txt = new TextBlock { Text = m?.Name, Margin = new Thickness(6, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center, FontSize = 11 };
+            var sp = new StackPanel { Orientation = Orientation.Horizontal };
+            sp.Children.Add(img);
+            sp.Children.Add(txt);
+            return sp;
+        });
+
+    private void PopulateMaterials()
+    {
+        _matThumbs = new List<MaterialThumb>();
+        var names = _currentDoc?.Materials ?? new List<string>();
+        for (int i = 0; i < names.Count; i++)
+        {
+            Avalonia.Media.Imaging.Bitmap? thumb = null;
+            try
+            {
+                var t = _matLibrary?.Get(names[i]);
+                if (t is { } r) thumb = MakeThumb(r.Rgba, r.Width, r.Height);
+            }
+            catch { /* skip unrenderable */ }
+            _matThumbs.Add(new MaterialThumb { Name = names[i], Index = i, Image = thumb });
+        }
+        _materialList.ItemsSource = _matThumbs;
+    }
+
+    private static Avalonia.Media.Imaging.Bitmap MakeThumb(byte[] rgba, int w, int h)
+    {
+        const int S = 32;
+        var dst = new byte[S * S * 4];
+        for (int y = 0; y < S; y++)
+            for (int x = 0; x < S; x++)
+            {
+                int sx = w > 0 ? x * w / S : 0, sy = h > 0 ? y * h / S : 0;
+                int si = (sy * w + sx) * 4, di = (y * S + x) * 4;
+                if (si + 3 < rgba.Length) Array.Copy(rgba, si, dst, di, 4);
+            }
+        return VulkanViewport.ToBitmap(dst, S, S);
+    }
+
+    private void OnMaterialPicked()
+    {
+        if (_materialList.SelectedItem is MaterialThumb m && !_view.SetSelectedSurfaceMaterial(m.Name, m.Index))
+            _status.Text = "Select a surface first, then click a material";
     }
 
     private async void SaveAs()
@@ -303,6 +379,8 @@ public class MainWindow : Window
         _levelArchive = null;
         _materialArchives = Array.Empty<GobArchive>();
         _modelLibrary = null;
+        _matLibrary = null;
+        _materialList.ItemsSource = null;
         _levels = new();
         _levelList.ItemsSource = null;
     }

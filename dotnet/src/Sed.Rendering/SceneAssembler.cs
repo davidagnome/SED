@@ -38,10 +38,11 @@ public sealed class SceneAssembler
             int skyMode = (surface.SurfFlags & Surface.SfSkyCeiling) != 0 ? 1
                         : (surface.SurfFlags & Surface.SfSkyHorizon) != 0 ? 2 : 0;
             var mesh = For(surface.Material, surface.IsTranslucent, skyMode);
-            float sky = surface.IsSky ? 1f : -1f; // -1 => use per-vertex intensity
+            float sky = surface.IsSky ? 1f : -1f;     // -1 => use per-vertex intensity
+            float ambient = sector.Ambient.R;          // sector ambient acts as a light floor
             var c0 = surface.Corners[0];
             for (int i = 1; i + 1 < surface.Corners.Count; i++)
-                mesh.AddTriangle(SurfVertex(c0, n, sky), SurfVertex(surface.Corners[i], n, sky), SurfVertex(surface.Corners[i + 1], n, sky));
+                mesh.AddTriangle(SurfVertex(c0, n, sky, ambient), SurfVertex(surface.Corners[i], n, sky, ambient), SurfVertex(surface.Corners[i + 1], n, sky, ambient));
         }
     }
 
@@ -154,9 +155,9 @@ public sealed class SceneAssembler
     }
 
     /// <summary>Per-vertex light intensity is carried in the color channel (0..1); sky is full bright.</summary>
-    private static MeshVertex SurfVertex(Surface.Corner c, Vec3 normal, float skyOverride)
+    private static MeshVertex SurfVertex(Surface.Corner c, Vec3 normal, float skyOverride, float ambient)
     {
-        float i = skyOverride >= 0 ? skyOverride : c.Intensity.R;
+        float i = skyOverride >= 0 ? skyOverride : System.Math.Max(c.Intensity.R, ambient);
         return new MeshVertex(c.Vertex.Position, normal, new ColorF(i, i, i), c.Uv.U, c.Uv.V);
     }
 }

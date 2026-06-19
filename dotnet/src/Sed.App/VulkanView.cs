@@ -248,6 +248,8 @@ public sealed class VulkanView : Control
         if (e.Key == Key.OemComma) { ScaleSelection(0.9); e.Handled = true; return; }
         if (e.Key == Key.OemPeriod) { ScaleSelection(1.0 / 0.9); e.Handled = true; return; }
         if (e.Key == Key.M) { CycleMaterial(); e.Handled = true; return; }
+        if (e.Key == Key.OemSemicolon) { AdjustLight(-0.1f); e.Handled = true; return; }
+        if (e.Key == Key.OemQuotes) { AdjustLight(0.1f); e.Handled = true; return; }
 
         if (HasSelection && TryMoveDelta(e.Key, out var delta))
         {
@@ -345,6 +347,15 @@ public sealed class VulkanView : Control
                 TransformVerticesCommand.Scale(SectorCenter(sec), factor), "Scale sector"));
     }
 
+    /// <summary>Assigns a material to the selected surface (no-op if no surface is selected).</summary>
+    public bool SetSelectedSurfaceMaterial(string material, int index)
+    {
+        if (_selectedSurface is not { } s) return false;
+        History.Do(new SetMaterialCommand(s, material, index));
+        SelectionChanged?.Invoke($"Material → {material}");
+        return true;
+    }
+
     /// <summary>Cycles the selected surface's material to the next available one.</summary>
     private void CycleMaterial()
     {
@@ -353,6 +364,15 @@ public sealed class VulkanView : Control
         int next = (cur + 1) % Materials.Count;
         History.Do(new SetMaterialCommand(s, Materials[next], next));
         SelectionChanged?.Invoke($"Material → {Materials[next]} (M to cycle)");
+    }
+
+    /// <summary>Brightens/darkens the selected vertex light, or the active sector's ambient.</summary>
+    private void AdjustLight(float delta)
+    {
+        if (_selectedVertex is { } v && _activeSector is { } sec)
+            History.Do(SetVertexLightCommand.Adjust(sec, v, delta));
+        else if (_activeSector is { } s)
+            History.Do(SetSectorAmbientCommand.Adjust(s, delta));
     }
 
     private static Vec3 SectorCenter(Sector sector)

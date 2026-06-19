@@ -150,6 +150,15 @@ public class JklRoundTripTests
     }
 
     [Fact]
+    public void SectorAmbientLight_PersistsThroughSave()
+    {
+        var doc = JklParser.ParseDocument(Jkl);
+        doc.Level.Sectors[0].Ambient = new Sed.Core.Math.ColorF(0.5f, 0.5f, 0.5f);
+        var reloaded = JklParser.Parse(JklWriter.Build(doc));
+        Assert.Equal(0.5f, reloaded.Sectors[0].Ambient.R, 3);
+    }
+
+    [Fact]
     public void UneditedSave_IsContentEquivalent()
     {
         var doc = JklParser.ParseDocument(Jkl);

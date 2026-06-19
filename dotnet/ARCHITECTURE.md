@@ -72,7 +72,10 @@ The instance is created with `VK_KHR_portability_enumeration` +
 
 Verified: `vkCreateInstance` OK → `Apple M4 Pro [IntegratedGpu] Vulkan 1.2.334`.
 
-## Next steps (roughly in order)
+## Completed milestones (chronological)
+
+For the work that *remains* to reach feature parity with the original editor, see
+**Roadmap to parity** below the list.
 
 1. ~~Device + logical device + queue~~ ✅
 2. ~~Avalonia shell hosting Vulkan output~~ ✅
@@ -145,7 +148,131 @@ length, char[128] name }. Names use `\` separators (e.g. `jkl\01narshadda.jkl`).
 21. ~~Exact horizon screen-projection~~ ✅ fragment shader screen-space horizon
     (gl_FragCoord + camera yaw/pitch/roll → 1 texture per 360°); ceiling sky via
     ray-to-plane. Push constant grew to 152 B (MoltenVK max 4096).
-    **Next:** material picker panel, surface split, COG/template editing, lighting tools.
+22. ~~Lighting tools~~ ✅ `SetSectorAmbientCommand`, `SetVertexLightCommand`;
+    `;`/`'` darken/brighten the active sector's ambient (or the selected vertex's
+    light). Sector ambient is a light floor in `SceneAssembler` (edits are visible)
+    and persists on save.
+23. ~~Material inspector panel~~ ✅ right-side panel lists the level's materials
+    with decoded thumbnails (`MaterialLibrary.Get` → downsampled bitmap); click a
+    material to assign it to the selected surface (`VulkanView.SetSelectedSurfaceMaterial`).
+
+---
+
+## Roadmap to parity with the original SED (`src/*.PAS`)
+
+The milestones above cover **rendering, formats, save, and core editing**. What
+remains to match the Delphi/VCL editor's *functionality* is listed below, grouped
+by area and ordered by leverage. Each item names the original unit(s) to mirror
+and the architectural adaptation (VCL→Avalonia, DirectX→Vulkan, COM/DLL→managed).
+A feature is "parity-done" when it round-trips to a game-loadable JKL and is
+reachable from the editor UI.
+
+Status legend: ⬜ not started · 🟡 partial · ✅ done.
+
+### P1 — 2D orthographic map views (the original's primary editor surface) ⬜
+The Delphi editor edits in **2D top/side/front map panes with a grid** (`JED_MAIN`,
+`Render.pas`/`RenderSW`), using 3D only as a preview. We currently have *only* the
+3D fly viewport. This is the largest architectural gap.
+- Add an Avalonia `MapView` control (2D, `DrawingContext` or a 2nd Vulkan ortho
+  pass) rendering sectors/surfaces/vertices/things as lines/dots from a chosen
+  axis (XY/XZ/YZ) with pan/zoom.
+- Grid rendering + **snap-to-grid** and **snap-to-vertex** (`Grid Control`,
+  `Snap Grid to Object`).
+- Selection + drag editing in 2D (vertices/surfaces/things), reusing the existing
+  `IEditCommand`s.
+- Layout: split panes (2D map + 3D preview), or a view toggle.
+
+### P2 — Selection model: multi-select + copy/paste ⬜
+Mirror `u_multisel.pas`, `u_copypaste.pas`.
+- Multi-selection set (things/surfaces/sectors/vertices); box-select in the map view.
+- Transform commands already accept vertex sets — extend selection plumbing to feed them.
+- Copy/paste and **paste-in-place** of things and sector geometry (clipboard = a
+  serialized fragment of the model); undoable.
+
+### P3 — Core geometry operations ⬜
+Mirror `SAVEJKL.INC`-adjacent ops in `JED_MAIN`/`TBAR_TOOLS`:
+- **Adjoins**: make/remove adjoin between two surfaces (the portal connection);
+  auto-pair mirrors. The model already stores `Surface.Adjoin`/`AdjoinFlags` and
+  the writer emits mirror-pairs — needs the editor command + UI.
+- **Extrude surface** (`ExtrudeSurface`, `ExtrudeAndExpandSurface`) — pull a
+  surface along its normal, generating side surfaces (new room/protrusion).
+- **Cleave / split** (`CleaveSecBySec`, `CleaveSurfBySurf`, `CleaveAdjoin`) — split
+  a sector/surface by another's plane.
+- **Flip surface** (`FlipSurface`), insert vertex (have `InsertSurfaceVertexCommand`
+  🟡), bridge/connect sectors.
+- All as `IEditCommand`s so undo + faithful save come for free.
+
+### P4 — Texture mapping tools ⬜
+Mirror the `&Texturing` menu (`ShiftTexture`/`ScaleTexture`/`RotateTexture`,
+auto/fit/align-from-adjoin).
+- Per-surface UV transforms (offset/scale/rotate) editing `Surface.Corner.Uv`;
+  auto-texture (project), fit-to-surface, align-to-adjoin.
+- Surface flags affecting tex (`SF_DoubleRes`/`HalfRes`, `FF_TexClampX/Y`).
+- Commands persist via the existing GEORESOURCE regeneration.
+
+### P5 — Lighting calculation ⬜
+Mirror `Calculate &Lighting` (`lev_utils.pas`).
+- Static light propagation from point lights to per-vertex intensities
+  (`Sed.Lights` → `Surface.Corner.Intensity`), respecting sector ambient/extra.
+- Point-light entities (`TSedLight`) add/edit/delete in the LIGHTS section
+  (parser currently skips LIGHTS — add read + faithful write).
+- Per-vertex/sector/surface light editing exists 🟡 (`SetVertexLight`/`SetSectorAmbient`).
+
+### P6 — Things, templates, COGs (gameplay data) ⬜
+Mirror `Item_edit`, `U_TEMPLATES`/`U_TPLCREATE`, `U_COGFORM`/`U_COGGEN`, `U_CSCENE`.
+- **Item editor**: edit a selected thing's full template params (typed fields).
+- **Template editor/creator**: view/edit/add templates (parser reads them 🟡;
+  add full param model + UI + faithful TEMPLATES write).
+- **COGs**: parse the COGS section (skipped now) + faithful write; placed-cog
+  symbol-value editor; COG generator; cutscene helper.
+- Thing create/delete/move/rotate exist ✅.
+
+### P7 — Find / navigate / inspect ⬜
+Mirror `Q_Sectors`/`Q_surfs`/`Q_things`, `Jump to Object`.
+- Find dialogs (by id/name/flags) for sectors/surfaces/things; jump-to + frame.
+- **Sector/surface/thing property inspector** panel (flags, light, tint, sound,
+  material) with typed editors → `IEditCommand`s. (Material panel done ✅.)
+- Consistency checker (`CONS_CHECKER`): validate normals, adjoins, missing
+  collision/visible flags → a problems list.
+
+### P8 — Header / layers / level admin ⬜
+Mirror `U_LHEADER`, layers, `U_MEDIT`.
+- Level header editor (gravity, sky params, fog, mipmap/LOD, perspective/gouraud).
+  Parser reads some header fields 🟡; extend + faithful HEADER write.
+- Layers: parse LAYERS (skipped now), per-object layer assignment, visibility
+  toggles. Episode editor.
+
+### P9 — File / GOB project / test-launch ⬜
+Mirror `Gob Project`, `Save JKL and Test`, `FILEOPERATIONS`.
+- **GOB writer** (we only read GOBs): build/update a GOB so "Save JKL+GOB" works.
+- "Save and test" — launch the game with the level (on macOS: via the user's
+  Wine/CrossOver or a configured command).
+- Import/export: DF import (`U_DFI`/`DF_IMPORT.INC`), `.3do`/shape export of a
+  sector (`Export Sector as 3DO`), ASC/LEV import.
+
+### P10 — 3DO model tooling ⬜
+Mirror `U_3DOS`/`U_3DOFORM`/`U_3doprev` (we render 3DO ✅, don't edit).
+- 3DO hierarchy viewer/editor; standalone 3DO preview window; export sector→3DO.
+
+### P11 — Editor UX parity ⬜
+Mirror `U_OPTIONS`, recent files, recovery.
+- Configurable keybindings, grid/units, recent-files, autosave/backup &
+  crash-recovery, multi-game project switching (game-install config done ✅).
+
+### P12 — Extensibility (architectural redesign) ⬜
+The original plugin host is **Windows COM + native DLLs** (`SED_COM`,
+`sed_plugins`) — not portable. Parity = a **managed plugin model**: define a
+`Sed.Plugins` contract and load plugin assemblies via `AssemblyLoadContext`
+(cross-platform). Treat as opt-in, last.
+
+### Cross-cutting notes
+- **Renderer**: 2D map views may warrant a second (orthographic, line) pipeline
+  or Avalonia-native drawing; the 3D path stays Vulkan/MoltenVK.
+- **Save**: every new edit must flow through `IEditCommand` and be covered by the
+  GEORESOURCE/SECTORS/THINGS regeneration (or a new section writer) so it
+  round-trips. LIGHTS/COGS/TEMPLATES/HEADER/LAYERS still need read+write parity.
+- **Verification**: keep the probe-per-feature + round-trip-count pattern; a level
+  is "parity-correct" when it loads in retail Jedi Knight (user-verified).
 
 ### MAT / CMP formats (from `src/graph_files.pas`)
 
