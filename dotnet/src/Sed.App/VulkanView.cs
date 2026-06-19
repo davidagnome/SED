@@ -52,6 +52,9 @@ public sealed class VulkanView : Control
     private TextureLookup? _textures;
     private Func<string, ThreeDoModel?>? _models;
 
+    /// <summary>Material names available for assignment (for cycling a surface's material).</summary>
+    public List<string> Materials { get; set; } = new();
+
     /// <summary>Undo/redo history for edits made in this viewport.</summary>
     public EditHistory History { get; } = new();
 
@@ -184,7 +187,8 @@ public sealed class VulkanView : Control
         if (_renderer is null || _lastSize.Width < 1 || _lastSize.Height < 1) return;
         uint w = (uint)_lastSize.Width, h = (uint)_lastSize.Height;
         var mvp = Cam().ViewProjection((double)w / h);
-        var pixels = _renderer.Render(mvp, _camPos, w, h);
+        var deg = 180.0 / System.Math.PI;
+        var pixels = _renderer.Render(mvp, _camPos, new Vec3(_yaw * deg, _pitch * deg, 0), w, h);
         _bitmap = VulkanViewport.ToBitmap(pixels, (int)w, (int)h);
         InvalidateVisual();
     }
@@ -239,6 +243,11 @@ public sealed class VulkanView : Control
         }
         if (e.Key == Key.Delete) { DeleteSelected(); e.Handled = true; return; }
         if (e.Key == Key.N) { CreateSector(); e.Handled = true; return; }
+        if (e.Key == Key.OemOpenBrackets) { Rotate(-15); e.Handled = true; return; }
+        if (e.Key == Key.OemCloseBrackets) { Rotate(15); e.Handled = true; return; }
+        if (e.Key == Key.OemComma) { ScaleSelection(0.9); e.Handled = true; return; }
+        if (e.Key == Key.OemPeriod) { ScaleSelection(1.0 / 0.9); e.Handled = true; return; }
+        if (e.Key == Key.M) { CycleMaterial(); e.Handled = true; return; }
 
         if (HasSelection && TryMoveDelta(e.Key, out var delta))
         {
@@ -317,6 +326,40 @@ public sealed class VulkanView : Control
         if (sec is null) { SelectionChanged?.Invoke("Select a surface first, then Delete Sector"); return; }
         _selectedSurface = null; _selectedVertex = null; _activeSector = null;
         History.Do(new DeleteSectorCommand(_level, sec));
+    }
+
+    /// <summary>Rotates the selected thing's yaw, or the active sector's geometry, about Z.</summary>
+    private void Rotate(double degrees)
+    {
+        if (_selectedThing is { } t) { History.Do(new RotateThingCommand(t, degrees)); return; }
+        if (_activeSector is { } sec && sec.Vertices.Count > 0)
+            History.Do(new TransformVerticesCommand(sec.Vertices,
+                TransformVerticesCommand.RotateZ(SectorCenter(sec), degrees * System.Math.PI / 180.0), "Rotate sector"));
+    }
+
+    /// <summary>Scales the active sector's geometry about its centre.</summary>
+    private void ScaleSelection(double factor)
+    {
+        if (_activeSector is { } sec && sec.Vertices.Count > 0)
+            History.Do(new TransformVerticesCommand(sec.Vertices,
+                TransformVerticesCommand.Scale(SectorCenter(sec), factor), "Scale sector"));
+    }
+
+    /// <summary>Cycles the selected surface's material to the next available one.</summary>
+    private void CycleMaterial()
+    {
+        if (_selectedSurface is not { } s || Materials.Count == 0) return;
+        int cur = Materials.FindIndex(m => string.Equals(m, s.Material, StringComparison.OrdinalIgnoreCase));
+        int next = (cur + 1) % Materials.Count;
+        History.Do(new SetMaterialCommand(s, Materials[next], next));
+        SelectionChanged?.Invoke($"Material → {Materials[next]} (M to cycle)");
+    }
+
+    private static Vec3 SectorCenter(Sector sector)
+    {
+        var sum = Vec3.Zero;
+        foreach (var v in sector.Vertices) sum += v.Position;
+        return sum * (1.0 / sector.Vertices.Count);
     }
 
     private void DeleteSelected()

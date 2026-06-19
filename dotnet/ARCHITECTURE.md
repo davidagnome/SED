@@ -137,8 +137,15 @@ length, char[128] name }. Names use `\` separators (e.g. `jkl\01narshadda.jkl`).
 18. ~~View-projected scrolling sky~~ ✅ ceiling sky = ray-to-plane → world-XY UV;
     horizon sky = view-direction cylindrical (scrolls with rotation); computed in
     the fragment shader (camPos + sky params in push constant), full-bright.
-    **Next:** more edit ops (rotate/scale, split surface), texture/material editing,
-    cog/template editing, exact horizon screen-projection.
+19. ~~Rotate/scale edits~~ ✅ `RotateThingCommand`, `TransformVerticesCommand`
+    (rotate/scale about a pivot). `[`/`]` rotate (thing yaw or active sector),
+    `,`/`.` scale the active sector.
+20. ~~Material editing~~ ✅ `SetMaterialCommand`; **M** cycles the selected
+    surface's material through the level's material list. Persists on save.
+21. ~~Exact horizon screen-projection~~ ✅ fragment shader screen-space horizon
+    (gl_FragCoord + camera yaw/pitch/roll → 1 texture per 360°); ceiling sky via
+    ray-to-plane. Push constant grew to 152 B (MoltenVK max 4096).
+    **Next:** material picker panel, surface split, COG/template editing, lighting tools.
 
 ### MAT / CMP formats (from `src/graph_files.pas`)
 

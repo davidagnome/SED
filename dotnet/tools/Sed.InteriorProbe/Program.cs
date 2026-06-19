@@ -59,7 +59,9 @@ for (int i = 0; i < dists.Length; i++)
     var eye = anchor.Position + new Vec3(d * 0.8, -d, d * 0.6);
     var cam = Camera.LookingAt(eye, anchor.Position, 75);
     cam.NearPlane = 0.01; cam.FarPlane = 200;
-    var pixels = renderer.Render(cam.ViewProjection((double)W / H), cam.Position, W, H);
+    var deg = 180.0 / System.Math.PI;
+    var pixels = renderer.Render(cam.ViewProjection((double)W / H), cam.Position,
+        new Vec3(cam.Yaw * deg, cam.Pitch * deg, 0), W, H);
     var outPath = $"/tmp/interior_{levelName}_d{i}.png";
     PngWriter.Write(outPath, pixels, (int)W, (int)H);
     Console.WriteLine($"  dist {d} → {outPath}");

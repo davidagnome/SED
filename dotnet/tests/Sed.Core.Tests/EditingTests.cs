@@ -56,6 +56,55 @@ public class EditingTests
     }
 }
 
+public class TransformTests
+{
+    [Fact]
+    public void RotateThing_AdjustsYaw_AndReverts()
+    {
+        var t = new Thing { Yaw = 30 };
+        var cmd = new RotateThingCommand(t, 90);
+        cmd.Apply(); Assert.Equal(120, t.Yaw, 6);
+        cmd.Revert(); Assert.Equal(30, t.Yaw, 6);
+    }
+
+    [Fact]
+    public void TransformVertices_RotatesAboutPivot_AndReverts()
+    {
+        var v = new Vertex(new Vec3(1, 0, 0));
+        var cmd = new TransformVerticesCommand(new[] { v },
+            TransformVerticesCommand.RotateZ(Vec3.Zero, System.Math.PI / 2), "r");
+        cmd.Apply();
+        Assert.Equal(0, v.Position.X, 6);
+        Assert.Equal(1, v.Position.Y, 6);
+        cmd.Revert();
+        Assert.Equal(new Vec3(1, 0, 0), v.Position);
+    }
+
+    [Fact]
+    public void TransformVertices_ScalesAboutPivot()
+    {
+        var v = new Vertex(new Vec3(2, 0, 0));
+        var cmd = new TransformVerticesCommand(new[] { v }, TransformVerticesCommand.Scale(Vec3.Zero, 0.5), "s");
+        cmd.Apply();
+        Assert.Equal(new Vec3(1, 0, 0), v.Position);
+    }
+
+    [Fact]
+    public void SetMaterial_ChangesAndReverts()
+    {
+        var level = SampleScene.CreateCube();
+        var s = level.Sectors[0].Surfaces[0];
+        s.Material = "old.mat"; s.MaterialIndex = 3;
+        var cmd = new SetMaterialCommand(s, "new.mat", 7);
+        cmd.Apply();
+        Assert.Equal("new.mat", s.Material);
+        Assert.Equal(7, s.MaterialIndex);
+        cmd.Revert();
+        Assert.Equal("old.mat", s.Material);
+        Assert.Equal(3, s.MaterialIndex);
+    }
+}
+
 public class GeometryEditTests
 {
     [Fact]

@@ -7,13 +7,15 @@ layout(location = 3) in vec2 inUv;
 
 layout(push_constant) uniform Push {
     mat4 mvp;          // 0
-    vec4 camPos;       // 64  (xyz)
-    vec4 sky;          // 80  (x=ceilZ, y=offX, z=offY)
-    vec2 invTexSize;   // 96
-    uint mode;         // 104 (0=indexed+lit, 1=flat)
-    float alpha;       // 108
-    float brightness;  // 112
-    uint skyMode;      // 116 (0=normal, 1=ceiling, 2=horizon)
+    vec4 camPos;       // 64
+    vec4 sky;          // 80  ceiling: (ceilZ, offX, offY, _)
+    vec4 camAngles;    // 96  (yawDeg, pitchDeg, rollDeg, _)
+    vec4 horizScreen;  // 112 (horizOffX, horizOffY, width, height)
+    vec2 invTexSize;   // 128
+    uint mode;         // 136
+    float alpha;       // 140
+    float brightness;  // 144
+    uint skyMode;      // 148
 } pc;
 
 layout(location = 0) out vec3 vColor;
@@ -25,5 +27,5 @@ void main()
     gl_Position = pc.mvp * vec4(inPos, 1.0);
     vColor = inColor;
     vUv = inUv * pc.invTexSize;
-    vWorld = inPos;   // geometry is already world-space
+    vWorld = inPos;
 }

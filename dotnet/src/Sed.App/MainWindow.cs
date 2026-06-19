@@ -260,6 +260,7 @@ public class MainWindow : Window
             catch { textures = null; }
         }
 
+        _view.Materials = _currentDoc?.Materials ?? new List<string>();
         _view.SetLevel(level, textures, models, paletteRgb, lightTable);
         int surfaces = level.Sectors.Sum(s => s.Surfaces.Count);
         _status.Text = $"{name} — {level.Sectors.Count} sectors, {surfaces} surfaces, " +

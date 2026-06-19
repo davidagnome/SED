@@ -35,15 +35,16 @@ public sealed unsafe class SceneRenderer : IDisposable
     private GpuTexture _palette;            // 256x1 RGBA
     private GpuTexture _lightRamp;          // 256x64 R8
     private float _brightness;              // 0 = real lighting, 1 = full bright
-    private float _ceilZ, _ceilOffX, _ceilOffY;   // ceiling-sky params
+    private float _ceilZ, _ceilOffX, _ceilOffY, _horizOffX, _horizOffY;   // sky params
 
     /// <summary>Editor brightness boost (0 = engine-accurate lighting, 1 = full bright).</summary>
     public void SetBrightness(float brightness) => _brightness = System.Math.Clamp(brightness, 0f, 1f);
 
-    /// <summary>Sets the level's ceiling-sky plane height and texture offset.</summary>
-    public void SetSky(float ceilingHeight, float offsetX, float offsetY)
+    /// <summary>Sets the level's sky parameters (ceiling plane height + texture offsets).</summary>
+    public void SetSky(float ceilingHeight, float ceilOffX, float ceilOffY, float horizOffX = 0, float horizOffY = 0)
     {
-        _ceilZ = ceilingHeight; _ceilOffX = offsetX; _ceilOffY = offsetY;
+        _ceilZ = ceilingHeight; _ceilOffX = ceilOffX; _ceilOffY = ceilOffY;
+        _horizOffX = horizOffX; _horizOffY = horizOffY;
     }
 
     // Geometry
@@ -194,8 +195,12 @@ public sealed unsafe class SceneRenderer : IDisposable
         return (vb, vm, ib, im, (uint)indices.Length);
     }
 
-    /// <summary>Renders one frame and returns tightly-packed RGBA8 pixels.</summary>
     public byte[] Render(Mat4 viewProjection, Vec3 camPos, uint width, uint height,
+        float clearR = 0.05f, float clearG = 0.05f, float clearB = 0.08f) =>
+        Render(viewProjection, camPos, Vec3.Zero, width, height, clearR, clearG, clearB);
+
+    /// <summary>Renders one frame; <paramref name="camAngles"/> = (yaw, pitch, roll) degrees for sky.</summary>
+    public byte[] Render(Mat4 viewProjection, Vec3 camPos, Vec3 camAngles, uint width, uint height,
         float clearR = 0.05f, float clearG = 0.05f, float clearB = 0.08f)
     {
         EnsureTargets(width, height);
@@ -216,7 +221,7 @@ public sealed unsafe class SceneRenderer : IDisposable
         var scissor = new Rect2D(new Offset2D(0, 0), new Extent2D(_width, _height));
         _vk.CmdSetViewport(cmd, 0, 1, in viewport);
         _vk.CmdSetScissor(cmd, 0, 1, in scissor);
-        PushHead(cmd, viewProjection, camPos);
+        PushHead(cmd, viewProjection, camPos, camAngles, _width, _height);
 
         // Opaque pass.
         if (_draws.Count > 0)
@@ -295,15 +300,17 @@ public sealed unsafe class SceneRenderer : IDisposable
         _vk.CmdBindIndexBuffer(cmd, ib, 0, IndexType.Uint32);
     }
 
-    // Push constant layout: mat4 mvp[0], vec4 camPos[64], vec4 sky[80] (head, 96 bytes);
-    // vec2 invTexSize[96], uint mode[104], float alpha[108], float brightness[112], uint skyMode[116].
-    private void PushHead(CommandBuffer cmd, Mat4 mvp, Vec3 camPos)
+    // Push layout: mvp[0], camPos[64], sky[80], camAngles[96], horizScreen[112] (head 128 B);
+    // invTexSize[128], mode[136], alpha[140], brightness[144], skyMode[148] (tail 24 B).
+    private void PushHead(CommandBuffer cmd, Mat4 mvp, Vec3 camPos, Vec3 camAngles, uint w, uint h)
     {
-        var buf = stackalloc byte[96];
+        var buf = stackalloc byte[128];
         fixed (float* m = mvp.M) System.Buffer.MemoryCopy(m, buf, 64, 64);
         *(float*)(buf + 64) = (float)camPos.X; *(float*)(buf + 68) = (float)camPos.Y; *(float*)(buf + 72) = (float)camPos.Z; *(float*)(buf + 76) = 0f;
         *(float*)(buf + 80) = _ceilZ; *(float*)(buf + 84) = _ceilOffX; *(float*)(buf + 88) = _ceilOffY; *(float*)(buf + 92) = 0f;
-        _vk.CmdPushConstants(cmd, _layout, ShaderStageFlags.VertexBit | ShaderStageFlags.FragmentBit, 0, 96, buf);
+        *(float*)(buf + 96) = (float)camAngles.X; *(float*)(buf + 100) = (float)camAngles.Y; *(float*)(buf + 104) = (float)camAngles.Z; *(float*)(buf + 108) = 0f;
+        *(float*)(buf + 112) = _horizOffX; *(float*)(buf + 116) = _horizOffY; *(float*)(buf + 120) = w; *(float*)(buf + 124) = h;
+        _vk.CmdPushConstants(cmd, _layout, ShaderStageFlags.VertexBit | ShaderStageFlags.FragmentBit, 0, 128, buf);
     }
 
     private void PushTail(CommandBuffer cmd, float invW, float invH, uint mode, float alpha, uint skyMode)
@@ -311,7 +318,7 @@ public sealed unsafe class SceneRenderer : IDisposable
         var buf = stackalloc byte[24];
         *(float*)(buf + 0) = invW; *(float*)(buf + 4) = invH; *(uint*)(buf + 8) = mode;
         *(float*)(buf + 12) = alpha; *(float*)(buf + 16) = _brightness; *(uint*)(buf + 20) = skyMode;
-        _vk.CmdPushConstants(cmd, _layout, ShaderStageFlags.VertexBit | ShaderStageFlags.FragmentBit, 96, 24, buf);
+        _vk.CmdPushConstants(cmd, _layout, ShaderStageFlags.VertexBit | ShaderStageFlags.FragmentBit, 128, 24, buf);
     }
 
     // ---- setup ----
@@ -468,7 +475,7 @@ public sealed unsafe class SceneRenderer : IDisposable
             var dyn = stackalloc DynamicState[2] { DynamicState.Viewport, DynamicState.Scissor };
             var dynState = new PipelineDynamicStateCreateInfo { SType = StructureType.PipelineDynamicStateCreateInfo, DynamicStateCount = 2, PDynamicStates = dyn };
 
-            var push = new PushConstantRange(ShaderStageFlags.VertexBit | ShaderStageFlags.FragmentBit, 0, 120);
+            var push = new PushConstantRange(ShaderStageFlags.VertexBit | ShaderStageFlags.FragmentBit, 0, 152);
             var setLayout = _setLayout;
             var layoutInfo = new PipelineLayoutCreateInfo
             {
