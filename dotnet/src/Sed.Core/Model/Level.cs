@@ -84,6 +84,18 @@ public sealed class Level
             Things[i].Num = i;
     }
 
+    public void RenumberLights()
+    {
+        for (int i = 0; i < Lights.Count; i++)
+            Lights[i].Num = i;
+    }
+
+    public void RenumberCogs()
+    {
+        for (int i = 0; i < Cogs.Count; i++)
+            Cogs[i].Num = i;
+    }
+
     /// <summary>Resolves a global surface by sector + local surface index (GetSectorSurfaceN).</summary>
     public Surface? GetSectorSurface(int sectorIndex, int surfaceIndex)
     {

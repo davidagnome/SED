@@ -54,6 +54,9 @@ public static class JklParser
                 case "SECTORS": LoadSectors(r, level, geo); break;
                 case "TEMPLATES": LoadTemplates(r, level); break;
                 case "THINGS": LoadThings(r, level, doc); break;
+                case "LIGHTS": LoadLights(r, level); break;
+                case "COGS": LoadCogs(r, level); break;
+                case "LAYERS": LoadLayers(r, level); break;
                 default: r.SkipToNextSection(); break;
             }
         }
@@ -95,16 +98,55 @@ public static class JklParser
         {
             var t = JklReader.Tokens(r.Current);
             if (t.Length < 2) continue;
-            if (t[0] == "VERSION")
+            var w0 = t[0];
+
+            if (w0 == "VERSION")
             {
                 level.Header.Version = JklReader.ParseInt(t[1]);
                 level.Kind = level.Header.Version is 2 or 3
                     ? ProjectType.InfernalMachine
                     : ProjectType.JediKnight;
             }
-            else if (t[0] == "WORLD" && t[1] == "GRAVITY" && t.Length >= 3)
-            {
+            else if (w0 == "WORLD" && t.Length >= 3 && t[1] == "GRAVITY")
                 level.Header.Gravity = (float)JklReader.ParseFloat(t[2]);
+            else if (w0 == "CEILING" && t.Length >= 3 && t[1] == "SKY" && t[2] == "Z")
+                level.Header.CeilingSky.Height = (float)JklReader.ParseFloat(t[3]);
+            else if (w0 == "CEILING" && t.Length >= 4 && t[1] == "SKY" && t[2] == "OFFSET")
+            {
+                level.Header.CeilingSky.Offset = new Vec2(
+                    JklReader.ParseFloat(t[3]), JklReader.ParseFloat(t.ElementAtOrDefault(4) ?? "0"));
+            }
+            else if (w0 == "HORIZON" && t.Length >= 3 && t[1] == "DISTANCE")
+                level.Header.HorizonSky.Distance = (float)JklReader.ParseFloat(t[2]);
+            else if (w0 == "HORIZON" && t.Length >= 4 && t[1] == "PIXELS" && t[2] == "PER" && t[3] == "REV")
+                level.Header.HorizonSky.PixelsPerRev = (float)JklReader.ParseFloat(t[4]);
+            else if (w0 == "HORIZON" && t.Length >= 4 && t[1] == "SKY" && t[2] == "OFFSET")
+            {
+                level.Header.HorizonSky.Offset = new Vec2(
+                    JklReader.ParseFloat(t[3]), JklReader.ParseFloat(t.ElementAtOrDefault(4) ?? "0"));
+            }
+            else if (w0 == "MIPMAP" && t.Length >= 6 && t[1] == "DISTANCES")
+            {
+                for (int i = 0; i < 4; i++)
+                    level.Header.MipmapDistances[i] = (float)JklReader.ParseFloat(t.ElementAtOrDefault(2 + i) ?? "0");
+            }
+            else if (w0 == "LOD" && t.Length >= 6 && t[1] == "DISTANCES")
+            {
+                for (int i = 0; i < 4; i++)
+                    level.Header.LodDistances[i] = (float)JklReader.ParseFloat(t.ElementAtOrDefault(2 + i) ?? "0");
+            }
+            else if (w0 == "PERSPECTIVE" && t.Length >= 2 && t[1] == "DISTANCE")
+                level.Header.PerspectiveDistance = (float)JklReader.ParseFloat(t[2]);
+            else if (w0 == "GOURAUD" && t.Length >= 2 && t[1] == "DISTANCE")
+                level.Header.GouraudDistance = (float)JklReader.ParseFloat(t[2]);
+            else if (w0 == "FOG" && t.Length >= 8)
+            {
+                level.Header.Fog.Enabled = JklReader.ParseInt(t[1]) != 0;
+                level.Header.Fog.Color = new ColorF(
+                    (float)JklReader.ParseFloat(t[2]), (float)JklReader.ParseFloat(t[3]),
+                    (float)JklReader.ParseFloat(t[4]));
+                level.Header.Fog.Start = JklReader.ParseFloat(t.ElementAtOrDefault(6) ?? "0");
+                level.Header.Fog.End = JklReader.ParseFloat(t.ElementAtOrDefault(7) ?? "0");
             }
         }
     }
@@ -419,12 +461,109 @@ public static class JklParser
         }
     }
 
+    // ---- LIGHTS ----
+
+    private static void LoadLights(JklReader r, Level level)
+    {
+        if (!r.Next()) return;
+        int n = LastInt(r.Current);
+        for (int i = 0; i < n; i++)
+        {
+            if (!r.Next(upper: false) || r.EndOfSection) break;
+            var t = JklReader.Tokens(JklReader.StripIndex(r.Current));
+            if (t.Length < 7) continue;
+
+            var light = level.NewLight();
+            // JK:    flags(hex) layer x y z range intensity
+            // MotS:  flags(hex) layer x y z range intensity r g b
+            light.Flags = JklReader.ParseHex(t[0]);
+            light.Layer = JklReader.ParseInt(t.ElementAtOrDefault(1) ?? "0");
+            light.Position = new Vec3(
+                JklReader.ParseFloat(t.ElementAtOrDefault(2) ?? "0"),
+                JklReader.ParseFloat(t.ElementAtOrDefault(3) ?? "0"),
+                JklReader.ParseFloat(t.ElementAtOrDefault(4) ?? "0"));
+            light.Range = JklReader.ParseFloat(t.ElementAtOrDefault(5) ?? "0");
+            light.Intensity = JklReader.ParseFloat(t.ElementAtOrDefault(6) ?? "1");
+            if (t.Length >= 10)
+            {
+                light.Color = new ColorF(
+                    (float)JklReader.ParseFloat(t[7]),
+                    (float)JklReader.ParseFloat(t[8]),
+                    (float)JklReader.ParseFloat(t[9]));
+            }
+        }
+    }
+
+    // ---- COGS ----
+
+    private static void LoadCogs(JklReader r, Level level)
+    {
+        if (!r.Next()) return;
+        int n = LastInt(r.Current);
+        for (int i = 0; i < n; i++)
+        {
+            if (!r.Next(upper: false) || r.EndOfSection) break;
+            var body = JklReader.StripIndex(r.Current).Trim();
+            var t = JklReader.Tokens(body);
+            if (t.Length == 0) continue;
+
+            var cog = new Cog { Name = t[0] };
+            for (int p = 1; p < t.Length; p++)
+                cog.Values.Add(t[p]);
+            level.Cogs.Add(cog);
+        }
+    }
+
+    // ---- LAYERS ----
+
+    private static void LoadLayers(JklReader r, Level level)
+    {
+        if (!r.Next()) return;
+        int n = LastInt(r.Current);
+        for (int i = 0; i < n; i++)
+        {
+            if (!r.Next(upper: false) || r.EndOfSection) break;
+            level.Layers.Add(r.Current.Trim());
+
+            // Sector indices line: "count:\tidx\tidx..."
+            if (!r.Next() || r.EndOfSection) break;
+            foreach (var idx in ParseIndexLine(r.Current))
+                if ((uint)idx < (uint)level.Sectors.Count) level.Sectors[idx].Layer = i;
+
+            // Thing indices line
+            if (!r.Next() || r.EndOfSection) break;
+            foreach (var idx in ParseIndexLine(r.Current))
+                if ((uint)idx < (uint)level.Things.Count) level.Things[idx].Layer = i;
+        }
+
+        EnsureLayersExist(level);
+    }
+
+    private static IEnumerable<int> ParseIndexLine(string line)
+    {
+        var colon = line.IndexOf(':');
+        var body = colon >= 0 ? line[(colon + 1)..] : line;
+        foreach (var t in JklReader.Tokens(body))
+            yield return JklReader.ParseInt(t);
+    }
+
+    private static void EnsureLayersExist(Level level)
+    {
+        int maxLayer = -1;
+        foreach (var s in level.Sectors) maxLayer = System.Math.Max(maxLayer, s.Layer);
+        foreach (var t in level.Things) maxLayer = System.Math.Max(maxLayer, t.Layer);
+        while (level.Layers.Count <= maxLayer)
+            level.Layers.Add($"Layer{level.Layers.Count}");
+    }
+
     // ---- post ----
 
     private static void PostProcess(Level level)
     {
         level.RenumberSectors();
         level.RenumberThings();
+        level.RenumberLights();
+        level.RenumberCogs();
         foreach (var sector in level.Sectors)
         {
             sector.Renumber();

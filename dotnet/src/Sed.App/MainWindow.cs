@@ -1,9 +1,11 @@
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Controls.Primitives;
 using Avalonia.Input;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Platform.Storage;
+using Sed.Core.Editing;
 using Sed.Core.Model;
 using Sed.Formats.Game;
 using Sed.Formats.Gob;
@@ -24,9 +26,12 @@ public class MainWindow : Window
     private readonly AppSettings _settings = AppSettings.Load();
     private readonly TextBlock _status;
     private readonly VulkanView _view;
+    private readonly MapView _mapView = new();
     private readonly ListBox _levelList;
     private readonly ListBox _materialList;
+    private readonly TextBox _materialFilter;
     private readonly TextBlock _sidePanelHeader;
+    private readonly InspectorPanel _inspector = new();
     private Sed.Formats.Material.MaterialLibrary? _matLibrary;
     private List<MaterialThumb> _matThumbs = new();
 
@@ -57,12 +62,31 @@ public class MainWindow : Window
             SelectionChanged = desc => _status.Text = desc ?? "Nothing selected",
         };
 
+        _inspector.SetHistory(_view.History);
+
+        // Share the undo history and selection state between 3D and 2D views.
+        _mapView.History = _view.History;
+        _mapView.SelectionChanged = desc => { if (desc is not null) _status.Text = desc; };
+        _view.SelectionFromExternal = (v, t, s, sec) =>
+        {
+            _mapView.NotifySelectionFrom3D(v, t, s, sec);
+            UpdateInspectorTarget();
+        };
+        _mapView.SyncVertex = v => { _view.SetExternalSelection(v, null, null); UpdateInspectorTarget(); };
+        _mapView.SyncThing = t => { _view.SetExternalSelection(null, t, null); UpdateInspectorTarget(); };
+        _mapView.SyncSurface = s => { _view.SetExternalSelection(null, null, s); UpdateInspectorTarget(); };
+
+        _view.History.Changed += UpdateInspectorTarget;
+
         _sidePanelHeader = new TextBlock { Margin = new Thickness(10, 8), Text = "No game configured", Foreground = Brushes.Gray };
         _levelList = new ListBox { Background = Brushes.Transparent };
         _levelList.SelectionChanged += (_, _) => OnLevelSelected();
 
         _materialList = new ListBox { Background = Brushes.Transparent, ItemTemplate = MaterialItemTemplate() };
         _materialList.SelectionChanged += (_, _) => OnMaterialPicked();
+
+        _materialFilter = new TextBox { Watermark = "Filter…", Margin = new Thickness(4, 2) };
+        _materialFilter.TextChanged += (_, _) => FilterMaterials();
 
         var root = new DockPanel();
         var menu = BuildMenu();
@@ -84,17 +108,45 @@ public class MainWindow : Window
         DockPanel.SetDock(sidePanel, Dock.Left);
         root.Children.Add(sidePanel);
 
-        // Right: material inspector (click a material to assign to the selected surface).
-        var matContent = new DockPanel { Width = 200 };
+        // Right: inspector + material panel (stacked).
+        var rightDock = new DockPanel { Width = 240 };
+
+        DockPanel.SetDock(_inspector, Dock.Top);
+        rightDock.Children.Add(_inspector);
+
+        // Material inspector (click a material to assign to the selected surface).
+        var matContent = new DockPanel();
         var matHeader = new TextBlock { Margin = new Thickness(10, 8), Text = "Materials — click to assign", Foreground = Brushes.Gray };
         DockPanel.SetDock(matHeader, Dock.Top);
         matContent.Children.Add(matHeader);
+        DockPanel.SetDock(_materialFilter, Dock.Top);
+        matContent.Children.Add(_materialFilter);
         matContent.Children.Add(_materialList);
-        var matPanel = new Border { Background = new SolidColorBrush(Color.FromRgb(0x1e, 0x1e, 0x22)), Child = matContent };
-        DockPanel.SetDock(matPanel, Dock.Right);
-        root.Children.Add(matPanel);
+        rightDock.Children.Add(matContent);
 
-        root.Children.Add(_view);
+        var rightPanel = new Border { Background = new SolidColorBrush(Color.FromRgb(0x1e, 0x1e, 0x22)), Child = rightDock };
+        DockPanel.SetDock(rightPanel, Dock.Right);
+        root.Children.Add(rightPanel);
+
+        // Mode toolbar (Sector/Surface/Vertex/Thing/Light).
+        var modeBar = BuildModeToolbar();
+        DockPanel.SetDock(modeBar, Dock.Top);
+        root.Children.Add(modeBar);
+
+        // Center: 3D viewport (top) split over the 2D map view (bottom).
+        var center = new Grid { RowDefinitions = new RowDefinitions("3*,Auto,2*") };
+        Grid.SetRow(_view, 0);
+        center.Children.Add(_view);
+        var splitter = new GridSplitter
+        {
+            Height = 4, ResizeDirection = GridResizeDirection.Rows,
+            Background = new SolidColorBrush(Color.FromRgb(0x33, 0x33, 0x3c)),
+        };
+        Grid.SetRow(splitter, 1);
+        center.Children.Add(splitter);
+        Grid.SetRow(_mapView, 2);
+        center.Children.Add(_mapView);
+        root.Children.Add(center);
         Content = root;
 
         TryAutoOpenConfiguredGame();
@@ -279,6 +331,7 @@ public class MainWindow : Window
 
         _view.Materials = _currentDoc?.Materials ?? new List<string>();
         _view.SetLevel(level, textures, models, paletteRgb, lightTable);
+        _mapView.SetLevel(level);
         PopulateMaterials();
         int surfaces = level.Sectors.Sum(s => s.Surfaces.Count);
         _status.Text = $"{name} — {level.Sectors.Count} sectors, {surfaces} surfaces, " +
@@ -321,6 +374,17 @@ public class MainWindow : Window
             _matThumbs.Add(new MaterialThumb { Name = names[i], Index = i, Image = thumb });
         }
         _materialList.ItemsSource = _matThumbs;
+    }
+
+    private void FilterMaterials()
+    {
+        var query = _materialFilter.Text?.Trim() ?? string.Empty;
+        if (query.Length == 0)
+            _materialList.ItemsSource = _matThumbs;
+        else
+            _materialList.ItemsSource = _matThumbs
+                .Where(m => m.Name.Contains(query, StringComparison.OrdinalIgnoreCase))
+                .ToList();
     }
 
     private static Avalonia.Media.Imaging.Bitmap MakeThumb(byte[] rgba, int w, int h)
@@ -387,14 +451,14 @@ public class MainWindow : Window
 
     private Menu BuildMenu()
     {
-        var open = new MenuItem { Header = "_Open…" };
+        var open = new MenuItem { Header = "_Open…", Icon = Glyph("\uE61E") };
         open.Click += (_, _) => OpenFile();
         var exit = new MenuItem { Header = "E_xit" };
         exit.Click += (_, _) => (Application.Current?.ApplicationLifetime
             as Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime)?.Shutdown();
         var file = new MenuItem { Header = "_File" };
         file.Items.Add(open);
-        var saveAs = new MenuItem { Header = "Save _As…", InputGesture = new KeyGesture(Key.S, KeyModifiers.Control) };
+        var saveAs = new MenuItem { Header = "Save _As…", InputGesture = new KeyGesture(Key.S, KeyModifiers.Control), Icon = Glyph("\uE236") };
         saveAs.Click += (_, _) => SaveAs();
         file.Items.Add(saveAs);
         file.Items.Add(new Separator());
@@ -434,7 +498,7 @@ public class MainWindow : Window
         }
 
         var view = new MenuItem { Header = "_View" };
-        var brightness = new MenuItem { Header = "Cycle _Brightness", InputGesture = new KeyGesture(Key.B) };
+        var brightness = new MenuItem { Header = "Cycle _Brightness", InputGesture = new KeyGesture(Key.B), Icon = Glyph("\uE18C") };
         brightness.Click += (_, _) => _view.CycleBrightness();
         view.Items.Add(brightness);
         var help = new MenuItem { Header = "_Help" };
@@ -447,6 +511,98 @@ public class MainWindow : Window
         menu.Items.Add(view);
         menu.Items.Add(help);
         return menu;
+    }
+
+    private static readonly FontFamily Phosphor = new("avares://Sed.App/Assets/Phosphor.ttf#Phosphor");
+
+    private static TextBlock Glyph(string glyph, double size = 13) => new()
+    {
+        Text = glyph,
+        FontFamily = Phosphor,
+        FontSize = size,
+        VerticalAlignment = VerticalAlignment.Center,
+        Margin = new Thickness(0, 0, 4, 0),
+    };
+
+    private Control BuildModeToolbar()
+    {
+        var bar = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 2 };
+        bar.Children.Add(new TextBlock
+        {
+            Text = "Mode: ",
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(6, 0),
+            FontSize = 11,
+            Foreground = Brushes.Gray,
+        });
+
+        EditMode[] modes = { EditMode.Sector, EditMode.Surface, EditMode.Vertex, EditMode.Thing, EditMode.Light };
+        string[] labels = { "Sector", "Surface", "Vertex", "Thing", "Light" };
+        string[] keys = { "S", "F", "V", "T", "L" };
+        string[] icons = { "\uED0A", "\uE45E", "\uE6CE", "\uECFE", "\uE2DC" };
+        var toggleButtons = new List<ToggleButton>();
+
+        for (int i = 0; i < modes.Length; i++)
+        {
+            var mode = modes[i];
+            var content = new StackPanel { Orientation = Orientation.Horizontal };
+            content.Children.Add(Glyph(icons[i]));
+            content.Children.Add(new TextBlock
+            {
+                Text = $"{labels[i]} ({keys[i]})",
+                FontSize = 11,
+                VerticalAlignment = VerticalAlignment.Center,
+            });
+
+            var btn = new ToggleButton
+            {
+                Content = content,
+                Padding = new Thickness(6, 2),
+                IsChecked = mode == EditMode.Surface,
+            };
+            btn.IsCheckedChanged += (_, _) =>
+            {
+                if (btn.IsChecked == true)
+                {
+                    foreach (var other in toggleButtons)
+                        if (other != btn) other.IsChecked = false;
+                    SetMode(mode);
+                }
+            };
+            toggleButtons.Add(btn);
+            bar.Children.Add(btn);
+        }
+
+        var border = new Border
+        {
+            Background = new SolidColorBrush(Color.FromRgb(0x25, 0x25, 0x2b)),
+            Child = bar,
+            Padding = new Thickness(0, 2),
+        };
+        return border;
+    }
+
+    private void SetMode(EditMode mode)
+    {
+        _view.Mode = mode;
+        _mapView.Mode = mode;
+        UpdateInspectorTarget();
+        _inspector.Mode = mode;
+        _status.Text = $"Mode: {mode}";
+    }
+
+    private void UpdateInspectorTarget()
+    {
+        object? target = _view.Mode switch
+        {
+            EditMode.Sector => (object?)_view.ActiveSector,
+            EditMode.Surface => (object?)_view.SelectedSurface,
+            EditMode.Vertex => (object?)_view.SelectedVertex,
+            EditMode.Thing => (object?)_view.SelectedThing,
+            EditMode.Light => null,
+            _ => null,
+        };
+        _inspector.SetTarget(target);
     }
 
     protected override void OnClosed(EventArgs e)

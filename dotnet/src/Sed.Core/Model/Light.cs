@@ -6,6 +6,7 @@ namespace Sed.Core.Model;
 public sealed class Light
 {
     public int Id;
+    public int Num;
     public long Flags;
     public int Layer;
 
@@ -18,8 +19,9 @@ public sealed class Light
 /// <summary>A COG script reference (TCOG).</summary>
 public sealed class Cog
 {
+    public int Num;
     public string Name = string.Empty;
-    public Dictionary<string, string> Values { get; } = new(StringComparer.OrdinalIgnoreCase);
+    public List<string> Values { get; } = new();
 }
 
 /// <summary>A thing template: a named bundle of parameters with optional parent inheritance.</summary>

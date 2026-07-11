@@ -16,10 +16,9 @@ public sealed class Surface
         public ColorF Intensity = ColorF.White;
     }
 
-    // Surface flags (SF_*)
+    // Legacy inline flags (prefer SurfaceFlags / FaceFlags constants in EngineFlags.cs).
     public const long SfSkyHorizon = 0x200;
     public const long SfSkyCeiling = 0x400;
-    // Face flags (FF_*)
     public const long FfTranslucent = 0x02;
 
     public int Num;

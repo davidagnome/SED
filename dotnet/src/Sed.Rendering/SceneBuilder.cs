@@ -39,6 +39,106 @@ public static class SceneBuilder
         return mesh;
     }
 
+    /// <summary>
+    /// Builds yellow edge beams along the surface perimeter plus orange vertex cubes
+    /// at each distinct corner — for selection highlighting without obscuring textures.
+    /// </summary>
+    public static Mesh BuildEdgeHighlight(Surface surface, double thickness, ColorF edgeColor, ColorF vertexColor)
+    {
+        var mesh = new Mesh();
+        int n = surface.Corners.Count;
+        for (int i = 0; i < n; i++)
+        {
+            var a = surface.Corners[i].Vertex.Position;
+            var b = surface.Corners[(i + 1) % n].Vertex.Position;
+            AppendBeam(mesh, a, b, thickness, edgeColor);
+        }
+        var seen = new HashSet<(long, long, long)>();
+        foreach (var c in surface.Corners)
+        {
+            var k = Snap(c.Vertex.Position);
+            if (seen.Add(k))
+                AppendCube(mesh, c.Vertex.Position, thickness * 1.5, vertexColor);
+        }
+        return mesh;
+    }
+
+    /// <summary>
+    /// Builds yellow edge beams for every edge in the sector (deduplicated) plus orange
+    /// vertex cubes at every distinct sector vertex.
+    /// </summary>
+    public static Mesh BuildSectorEdgeHighlight(Sector sector, double thickness, ColorF edgeColor, ColorF vertexColor)
+    {
+        var mesh = new Mesh();
+        var drawn = new HashSet<((long, long, long), (long, long, long))>();
+        foreach (var surf in sector.Surfaces)
+        {
+            int n = surf.Corners.Count;
+            for (int i = 0; i < n; i++)
+            {
+                var a = surf.Corners[i].Vertex.Position;
+                var b = surf.Corners[(i + 1) % n].Vertex.Position;
+                var ka = Snap(a);
+                var kb = Snap(b);
+                var key = CompareTuple(ka, kb) <= 0 ? (ka, kb) : (kb, ka);
+                if (drawn.Add(key))
+                    AppendBeam(mesh, a, b, thickness, edgeColor);
+            }
+        }
+        foreach (var v in sector.Vertices)
+            AppendCube(mesh, v.Position, thickness * 1.5, vertexColor);
+        return mesh;
+    }
+
+    private static (long, long, long) Snap(Vec3 v) =>
+        ((long)System.Math.Round(v.X * 10000), (long)System.Math.Round(v.Y * 10000), (long)System.Math.Round(v.Z * 10000));
+
+    private static int CompareTuple((long, long, long) a, (long, long, long) b)
+    {
+        int c = a.Item1.CompareTo(b.Item1);
+        if (c != 0) return c;
+        c = a.Item2.CompareTo(b.Item2);
+        if (c != 0) return c;
+        return a.Item3.CompareTo(b.Item3);
+    }
+
+    /// <summary>Builds a thin rectangular prism between two points (an edge beam).</summary>
+    private static void AppendBeam(Mesh mesh, Vec3 a, Vec3 b, double thickness, ColorF color)
+    {
+        var delta = b - a;
+        double len = delta.Length;
+        if (len < 1e-9) return;
+        var dir = delta / len;
+
+        var axis = System.Math.Abs(dir.Y) < 0.9 ? new Vec3(0, 1, 0) : new Vec3(1, 0, 0);
+        var right = dir.Cross(axis).Normalized();
+        var up = right.Cross(dir).Normalized();
+
+        double t = thickness;
+        Vec3[] p =
+        {
+            a - right*t - up*t, a + right*t - up*t, a + right*t + up*t, a - right*t + up*t,
+            b - right*t - up*t, b + right*t - up*t, b + right*t + up*t, b - right*t + up*t,
+        };
+        int[][] faces =
+        {
+            new[] { 0,1,2,3 }, new[] { 4,5,6,7 }, new[] { 0,1,5,4 },
+            new[] { 3,2,6,7 }, new[] { 0,3,7,4 }, new[] { 1,2,6,5 },
+        };
+        foreach (var f in faces)
+        {
+            var n = (p[f[1]] - p[f[0]]).Cross(p[f[2]] - p[f[0]]).Normalized();
+            mesh.AddTriangle(
+                new MeshVertex(p[f[0]], n, color),
+                new MeshVertex(p[f[1]], n, color),
+                new MeshVertex(p[f[2]], n, color));
+            mesh.AddTriangle(
+                new MeshVertex(p[f[0]], n, color),
+                new MeshVertex(p[f[2]], n, color),
+                new MeshVertex(p[f[3]], n, color));
+        }
+    }
+
     private static void AppendCube(Mesh mesh, Vec3 c, double h, ColorF color)
     {
         Vec3[] p =

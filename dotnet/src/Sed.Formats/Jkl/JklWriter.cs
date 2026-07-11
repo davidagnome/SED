@@ -1,12 +1,13 @@
 using System.Globalization;
+using System.Text;
 using Sed.Core.Model;
 
 namespace Sed.Formats.Jkl;
 
 /// <summary>
 /// Writes an edited <see cref="JklDocument"/> back to disk. The GEORESOURCE,
-/// SECTORS, and THINGS sections are regenerated from the model (so geometry and
-/// thing topology edits persist); every other section is kept verbatim.
+/// SECTORS, THINGS, LIGHTS, COGS, TEMPLATES, HEADER, and LAYERS sections are
+/// regenerated from the model; any unrecognized section is kept verbatim.
 /// </summary>
 public static class JklWriter
 {
@@ -16,12 +17,18 @@ public static class JklWriter
     public static string Build(JklDocument doc)
     {
         var src = doc.SourceLines;
-        var (geo, sectors) = GeoResourceWriter.Build(doc.Level);
+        var level = doc.Level;
+        var (geo, sectors) = GeoResourceWriter.Build(level);
 
         var ranges = new List<(int start, int end, List<string> replacement)>();
+        AddSection(ranges, src, "HEADER", GenerateHeader(level));
         AddSection(ranges, src, "GEORESOURCE", geo);
         AddSection(ranges, src, "SECTORS", sectors);
-        AddSection(ranges, src, "THINGS", GenerateThings(doc.Level));
+        AddSection(ranges, src, "TEMPLATES", GenerateTemplates(level));
+        AddSection(ranges, src, "THINGS", GenerateThings(level));
+        AddSection(ranges, src, "LIGHTS", GenerateLights(level));
+        AddSection(ranges, src, "COGS", GenerateCogs(level));
+        AddSection(ranges, src, "LAYERS", GenerateLayers(level));
         ranges.Sort((a, b) => a.start.CompareTo(b.start));
 
         var result = new List<string>(src.Length + 64);
@@ -102,5 +109,112 @@ public static class JklWriter
         return lines;
     }
 
+    private static List<string> GenerateHeader(Level level)
+    {
+        var h = level.Header;
+        var ijim = level.Kind == ProjectType.InfernalMachine;
+        var lines = new List<string> { "SECTION: HEADER" };
+        lines.Add($"VERSION {h.Version}");
+        lines.Add($"WORLD GRAVITY {F8(h.Gravity)}");
+        lines.Add($"CEILING SKY Z {F8(h.CeilingSky.Height)}");
+        lines.Add($"HORIZON DISTANCE {F8(h.HorizonSky.Distance)}");
+        lines.Add($"HORIZON PIXELS PER REV {F6(h.HorizonSky.PixelsPerRev)}");
+        lines.Add($"HORIZON SKY OFFSET {F8(h.HorizonSky.Offset.X)} {F8(h.HorizonSky.Offset.Y)}");
+        lines.Add($"CEILING SKY OFFSET {F8(h.CeilingSky.Offset.X)} {F8(h.CeilingSky.Offset.Y)}");
+        if (!ijim)
+            lines.Add($"MIPMAP DISTANCES {F6(h.MipmapDistances[0])} {F6(h.MipmapDistances[1])} {F6(h.MipmapDistances[2])} {F6(h.MipmapDistances[3])}");
+        lines.Add($"LOD DISTANCES {F6(h.LodDistances[0])} {F6(h.LodDistances[1])} {F6(h.LodDistances[2])} {F6(h.LodDistances[3])}");
+        if (ijim)
+            lines.Add($"FOG {(h.Fog.Enabled ? 1 : 0)} {F8(h.Fog.Color.R)} {F8(h.Fog.Color.G)} {F8(h.Fog.Color.B)} {F8(1.0)} {F8(h.Fog.Start)} {F8(h.Fog.End)}");
+        if (!ijim)
+            lines.Add($"PERSPECTIVE DISTANCE {F6(h.PerspectiveDistance)}");
+        if (!ijim)
+            lines.Add($"GOURAUD DISTANCE {F6(h.GouraudDistance)}");
+        lines.Add("END");
+        lines.Add("");
+        return lines;
+    }
+
+    private static List<string> GenerateTemplates(Level level)
+    {
+        var lines = new List<string> { "SECTION: TEMPLATES", "", $"World templates {level.Templates.Count}" };
+        foreach (var tpl in level.Templates.Values)
+        {
+            var sb = new StringBuilder();
+            sb.Append(tpl.Name).Append(' ').Append(tpl.Parent);
+            foreach (var (k, v) in tpl.Values)
+                sb.Append(' ').Append(k).Append('=').Append(v);
+            lines.Add(sb.ToString());
+        }
+        lines.Add("end");
+        lines.Add("");
+        return lines;
+    }
+
+    private static List<string> GenerateLights(Level level)
+    {
+        var motsOrIjim = level.Kind is ProjectType.MysteriesOfTheSith or ProjectType.InfernalMachine;
+        var lines = new List<string> { "SECTION: LIGHTS", "", $"Editor lights {level.Lights.Count}" };
+        for (int i = 0; i < level.Lights.Count; i++)
+        {
+            var lt = level.Lights[i];
+            var line = $"{i}: 0x{lt.Flags:x} {lt.Layer} {F8(lt.Position.X)} {F8(lt.Position.Y)} {F8(lt.Position.Z)} {F8(lt.Range)} {F8(lt.Intensity)}";
+            if (motsOrIjim)
+                line += $" {F8(lt.Color.R)} {F8(lt.Color.G)} {F8(lt.Color.B)}";
+            lines.Add(line);
+        }
+        lines.Add("end");
+        lines.Add("");
+        return lines;
+    }
+
+    private static List<string> GenerateCogs(Level level)
+    {
+        var lines = new List<string> { "SECTION: COGS", "", $"World cogs\t{level.Cogs.Count}" };
+        for (int i = 0; i < level.Cogs.Count; i++)
+        {
+            var cog = level.Cogs[i];
+            var sb = new StringBuilder();
+            sb.Append(i).Append(":\t").Append(cog.Name);
+            foreach (var v in cog.Values) sb.Append('\t').Append(v);
+            lines.Add(sb.ToString());
+        }
+        lines.Add("end");
+        lines.Add("");
+        return lines;
+    }
+
+    private static List<string> GenerateLayers(Level level)
+    {
+        var lines = new List<string> { "SECTION: LAYERS", "", $"Editor layers {level.Layers.Count}" };
+
+        for (int li = 0; li < level.Layers.Count; li++)
+        {
+            lines.Add($"#{level.Layers[li]}");
+
+            var secs = new List<int>();
+            for (int si = 0; si < level.Sectors.Count; si++)
+                if (level.Sectors[si].Layer == li) secs.Add(si);
+
+            var sbSec = new StringBuilder().Append(secs.Count).Append(':');
+            foreach (var s in secs) sbSec.Append('\t').Append(s);
+            lines.Add(sbSec.ToString());
+
+            var ths = new List<int>();
+            for (int ti = 0; ti < level.Things.Count; ti++)
+                if (level.Things[ti].Layer == li) ths.Add(ti);
+
+            var sbTh = new StringBuilder().Append(ths.Count).Append(':');
+            foreach (var t in ths) sbTh.Append('\t').Append(t);
+            lines.Add(sbTh.ToString());
+        }
+
+        lines.Add("end");
+        lines.Add("");
+        return lines;
+    }
+
     private static string F(double v) => v.ToString("0.000000", CultureInfo.InvariantCulture);
+    private static string F6(double v) => v.ToString("0.000000", CultureInfo.InvariantCulture);
+    private static string F8(double v) => v.ToString("0.00000000", CultureInfo.InvariantCulture);
 }
