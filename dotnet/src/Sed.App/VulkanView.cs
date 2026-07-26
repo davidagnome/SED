@@ -60,6 +60,12 @@ public sealed class VulkanView : Control
     /// </summary>
     public SelectionSet Selection { get; } = new();
 
+    /// <summary>
+    /// Shared layer visibility. Hidden layers are omitted from the scene and from
+    /// picking, so you cannot select geometry you cannot see.
+    /// </summary>
+    public LayerVisibility Layers { get; } = new();
+
     public Sector? ActiveSector => _activeSector;
     public Surface? SelectedSurface => Selection.PrimarySurface;
     public Vertex? SelectedVertex => Selection.PrimaryVertex;
@@ -99,6 +105,7 @@ public sealed class VulkanView : Control
         _moveTimer.Tick += (_, _) => MoveTick();
         History.Changed += OnHistoryChanged;
         Selection.Changed += OnSelectionChanged;
+        Layers.Changed += OnLayersChanged;
         SetLevel(level);
     }
 
@@ -124,9 +131,11 @@ public sealed class VulkanView : Control
         if (textures is not null)
         {
             var assembler = new SceneAssembler();
-            assembler.AddLevel(level);
+            assembler.AddLevel(level, Layers);
             // Things with a 3DO model render as geometry; the rest get markers.
-            _markerThings = models is not null ? assembler.AddThings(level, models) : level.Things.ToList();
+            _markerThings = models is not null
+                ? assembler.AddThings(level, models, Layers)
+                : level.Things.Where(Layers.IsVisible).ToList();
             _renderer.SetScene(assembler.Build(), textures);
         }
         else
@@ -158,7 +167,10 @@ public sealed class VulkanView : Control
         // they would bury the geometry otherwise.
         if (_level is not null && Mode == EditMode.Light)
             foreach (var light in _level.Lights)
+            {
+                if (!Layers.IsVisible(light)) continue;
                 markers.Append(SceneBuilder.BuildMarker(light.Position, _markerSize * 0.9, LightColor));
+            }
 
         if (_activeSector is not null && Mode == EditMode.Vertex)
             foreach (var v in _activeSector.Vertices)
@@ -171,8 +183,10 @@ public sealed class VulkanView : Control
     {
         if (_renderer is null || _level is null || _textures is null) return;
         var assembler = new SceneAssembler();
-        assembler.AddLevel(_level);
-        _markerThings = _models is not null ? assembler.AddThings(_level, _models) : _level.Things.ToList();
+        assembler.AddLevel(_level, Layers);
+        _markerThings = _models is not null
+            ? assembler.AddThings(_level, _models, Layers)
+            : _level.Things.Where(Layers.IsVisible).ToList();
         _renderer.UpdateGeometry(assembler.Build());
     }
 
@@ -202,6 +216,16 @@ public sealed class VulkanView : Control
     }
 
     private bool _loadingLevel;
+
+    /// <summary>Rebuilds the scene when a layer is shown or hidden.</summary>
+    private void OnLayersChanged()
+    {
+        if (_loadingLevel) return;
+        RebuildScene();
+        RefreshMarkers();
+        UpdateSelectionHighlight();
+        RenderFrame();
+    }
 
     private Camera Cam() => new()
     {
@@ -285,6 +309,7 @@ public sealed class VulkanView : Control
             if (e.Key == Key.D) { DuplicateSelection(); e.Handled = true; return; }
 
             // Geometry ops
+            if (e.Key == Key.B) { BridgeSelectedSurfaces(); e.Handled = true; return; }
             if (e.Key == Key.E) { ExtrudeSelectedSurface(shift ? -1.0 : 1.0); e.Handled = true; return; }
             if (e.Key == Key.F) { FlipSelectedSurface(); e.Handled = true; return; }
             if (e.Key == Key.K) { CleaveSelectedSurface(); e.Handled = true; return; }
@@ -669,6 +694,37 @@ public sealed class VulkanView : Control
             $"Adjoined sector {first.Sector.Num}/surface {first.Num} ↔ sector {s.Sector.Num}/surface {s.Num}");
     }
 
+    /// <summary>
+    /// Connects the two selected surfaces into a portal, trimming them to their
+    /// shared region first. Needs exactly two surfaces selected — Ctrl+click the
+    /// second one.
+    /// </summary>
+    public void BridgeSelectedSurfaces()
+    {
+        if (Selection.Surfaces.Count != 2)
+        {
+            SelectionChanged?.Invoke(
+                $"Bridge: select exactly two facing surfaces (Ctrl+click the second) — {Selection.Surfaces.Count} selected.");
+            return;
+        }
+
+        var a = Selection.Surfaces[0];
+        var b = Selection.Surfaces[1];
+
+        if (BridgeSurfacesCommand.Validate(a, b) is { } problem)
+        {
+            SelectionChanged?.Invoke($"Bridge: {problem}");
+            return;
+        }
+
+        var command = new BridgeSurfacesCommand(a, b);
+        History.Do(command);
+
+        SelectionChanged?.Invoke(command.Failure is null
+            ? $"Bridged sector {a.Sector.Num}/surface {a.Num} ↔ sector {b.Sector.Num}/surface {b.Num}"
+            : $"Bridge: {command.Failure}");
+    }
+
     /// <summary>Clears the selected surface's adjoin (and its mirror).</summary>
     public void RemoveSelectedAdjoin()
     {
@@ -995,7 +1051,7 @@ public sealed class VulkanView : Control
             {
                 case EditMode.Thing:
                     {
-                        var hit = Picker.PickThing(_level, ray, _markerSize * 1.8);
+                        var hit = Picker.PickThing(_level, ray, _markerSize * 1.8, Layers);
                         if (hit is null) { if (!extend) Selection.Clear(); break; }
                         if (extend) Selection.Toggle(hit.Thing);
                         else Selection.SelectOnly(hit.Thing);
@@ -1003,7 +1059,7 @@ public sealed class VulkanView : Control
                     }
                 case EditMode.Vertex:
                     {
-                        var hit = Picker.PickVertex(_level, ray, _markerSize);
+                        var hit = Picker.PickVertex(_level, ray, _markerSize, Layers);
                         if (hit is null) { if (!extend) Selection.Clear(); break; }
                         _activeSector = hit.Sector;
                         if (extend) Selection.Toggle(hit.Vertex);
@@ -1012,7 +1068,7 @@ public sealed class VulkanView : Control
                     }
                 case EditMode.Light:
                     {
-                        var hit = Picker.PickLight(_level, ray, _markerSize * 1.8);
+                        var hit = Picker.PickLight(_level, ray, _markerSize * 1.8, Layers);
                         if (hit is null) { if (!extend) Selection.Clear(); break; }
                         if (extend) Selection.Toggle(hit.Light);
                         else Selection.SelectOnly(hit.Light);
@@ -1022,7 +1078,7 @@ public sealed class VulkanView : Control
                 case EditMode.Surface:
                 default:
                     {
-                        var sHit = Picker.Pick(_level, ray);
+                        var sHit = Picker.Pick(_level, ray, Layers);
                         if (sHit is null) { if (!extend) Selection.Clear(); break; }
                         _activeSector = sHit.Sector;
                         if (extend) Selection.Toggle(sHit.Surface);

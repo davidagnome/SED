@@ -320,39 +320,9 @@ public static class LightCalculator
         a.Min.Y <= b.Max.Y && a.Max.Y >= b.Min.Y &&
         a.Min.Z <= b.Max.Z && a.Max.Z >= b.Min.Z;
 
-    /// <summary>
-    /// 2D point-in-polygon after dropping the axis the surface normal is most
-    /// aligned with — the projection that keeps the polygon largest and avoids
-    /// degenerate edge-on cases.
-    /// </summary>
-    private static bool PointOnSurface(Surface surf, Vec3 normal, Vec3 point)
-    {
-        double ax = System.Math.Abs(normal.X), ay = System.Math.Abs(normal.Y), az = System.Math.Abs(normal.Z);
-        int drop = az >= ax && az >= ay ? 2 : ay >= ax ? 1 : 0;
-
-        var (px, py) = Flatten(point, drop);
-        bool inside = false;
-
-        var corners = surf.Corners;
-        for (int i = 0, j = corners.Count - 1; i < corners.Count; j = i++)
-        {
-            var (ix, iy) = Flatten(corners[i].Vertex.Position, drop);
-            var (jx, jy) = Flatten(corners[j].Vertex.Position, drop);
-
-            if ((iy > py) != (jy > py) &&
-                px < (jx - ix) * (py - iy) / (jy - iy + 1e-30) + ix)
-                inside = !inside;
-        }
-
-        return inside;
-    }
-
-    private static (double u, double v) Flatten(Vec3 p, int drop) => drop switch
-    {
-        0 => (p.Y, p.Z),
-        1 => (p.X, p.Z),
-        _ => (p.X, p.Y),
-    };
+    /// <summary>Shared with the geometry ops so the two cannot drift apart.</summary>
+    private static bool PointOnSurface(Surface surf, Vec3 normal, Vec3 point) =>
+        GeometryOps.PointOnSurface(surf, point);
 
     // ---- sector lookup ----
 

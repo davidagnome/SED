@@ -1,3 +1,4 @@
+using Sed.Core.Editing;
 using Sed.Core.Math;
 using Sed.Core.Model;
 using Sed.Formats.ThreeDo;
@@ -15,21 +16,31 @@ public sealed class SceneAssembler
     /// <summary>Constant light for 3DO model surfaces (they aren't sector-lit here).</summary>
     private const float ModelLight = 0.8f;
 
-    private readonly record struct Batch(string Material, bool Translucent, int SkyMode);
+    private readonly record struct Batch(string Material, bool Translucent, int SkyMode, int ClampMode);
     private readonly Dictionary<Batch, Mesh> _byBatch = new();
 
-    private Mesh For(string material, bool translucent, int skyMode = 0)
+    private Mesh For(string material, bool translucent, int skyMode = 0, int clampMode = 0)
     {
-        var key = new Batch(material, translucent, skyMode);
+        // Levels declare the same material under different casings — 01narshadda
+        // has seven such pairs (01wgril1.mat / 01WGRIL1.mat). Material lookup is
+        // case-insensitive, so keying the batch case-sensitively would upload the
+        // same texture twice and add a redundant draw call per pair.
+        var key = new Batch(material.ToLowerInvariant(), translucent, skyMode, clampMode);
         if (!_byBatch.TryGetValue(key, out var mesh))
             _byBatch[key] = mesh = new Mesh();
         return mesh;
     }
 
-    /// <summary>Adds the level's textured surfaces (skipping no-material adjoin portals).</summary>
-    public void AddLevel(Level level)
+    /// <summary>
+    /// Adds the level's textured surfaces (skipping no-material adjoin portals).
+    /// Sectors on hidden layers are omitted when <paramref name="layers"/> is given.
+    /// </summary>
+    public void AddLevel(Level level, LayerVisibility? layers = null)
     {
         foreach (var sector in level.Sectors)
+        {
+            if (layers is not null && !layers.IsVisible(sector)) continue;
+
         foreach (var surface in sector.Surfaces)
         {
             if (surface.Corners.Count < 3 || string.IsNullOrEmpty(surface.Material)) continue;
@@ -37,12 +48,16 @@ public sealed class SceneAssembler
             var n = surface.Normal;
             int skyMode = (surface.SurfFlags & Surface.SfSkyCeiling) != 0 ? 1
                         : (surface.SurfFlags & Surface.SfSkyHorizon) != 0 ? 2 : 0;
-            var mesh = For(surface.Material, surface.IsTranslucent, skyMode);
+            // Texture addressing is per-draw state, so clamp flags split the batch.
+            int clampMode = ((surface.FaceFlags & FaceFlags.TexClampX) != 0 ? 1 : 0)
+                          | ((surface.FaceFlags & FaceFlags.TexClampY) != 0 ? 2 : 0);
+            var mesh = For(surface.Material, surface.IsTranslucent, skyMode, clampMode);
             float sky = surface.IsSky ? 1f : -1f;     // -1 => use per-vertex intensity
             float ambient = sector.Ambient.R;          // sector ambient acts as a light floor
             var c0 = surface.Corners[0];
             for (int i = 1; i + 1 < surface.Corners.Count; i++)
                 mesh.AddTriangle(SurfVertex(c0, n, sky, ambient), SurfVertex(surface.Corners[i], n, sky, ambient), SurfVertex(surface.Corners[i + 1], n, sky, ambient));
+        }
         }
     }
 
@@ -50,11 +65,14 @@ public sealed class SceneAssembler
     /// Instances each thing's 3DO model (resolved via templates) at its position
     /// and orientation. Returns the things that had no model (caller can mark them).
     /// </summary>
-    public List<Thing> AddThings(Level level, Func<string, ThreeDoModel?> modelProvider)
+    public List<Thing> AddThings(Level level, Func<string, ThreeDoModel?> modelProvider,
+        LayerVisibility? layers = null)
     {
         var unmodeled = new List<Thing>();
         foreach (var thing in level.Things)
         {
+            if (layers is not null && !layers.IsVisible(thing)) continue;
+
             var modelName = level.GetThingModel(thing);
             var model = string.IsNullOrEmpty(modelName) ? null : modelProvider(modelName);
             if (model is null || model.Meshes.Count == 0) { unmodeled.Add(thing); continue; }
@@ -149,6 +167,7 @@ public sealed class SceneAssembler
                 IndexCount = mesh.Indices.Count,
                 Translucent = batch.Translucent,
                 SkyMode = batch.SkyMode,
+                ClampMode = batch.ClampMode,
             });
         }
         return scene;

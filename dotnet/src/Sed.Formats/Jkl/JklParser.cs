@@ -416,7 +416,7 @@ public static class JklParser
             var t = JklReader.Tokens(r.Current);
             if (t.Length < 2 || t[0] is "#" or "//") continue;
 
-            var tpl = new Template { Name = t[0], Parent = t[1] };
+            var tpl = new Template { Name = t[0], Parent = t[1], Order = level.Templates.Count };
             for (int p = 2; p < t.Length; p++)
             {
                 int eq = t[p].IndexOf('=');

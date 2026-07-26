@@ -99,12 +99,12 @@ headlessly so UI changes can be eyeballed without opening a window.
 WAVE 0 (fully parallel — no inter-dependencies):
   S1 SelectionSet ✅ DONE     L1 LightCalculator ✅ DONE
   U1 HeaderEditor ✅ DONE     F1 SaveJklGob ✅ DONE
-  U2 LayerPanel               U3 TemplateEditor
-  G1 Bridge                   T1 TexFlags
+  U2 LayerPanel ✅ DONE       U3 TemplateEditor ✅ DONE
+  G1 Bridge ✅ DONE           T1 TexFlags 🟡 partial
 
 WAVE 1:
   S2 BoxSelect ✅ DONE    S3 CopyPaste ✅ DONE    L2 LightEntities ✅ DONE
-  Q1 FindDialogs ✅ DONE  U4 CogEditor (needs U3)
+  Q1 FindDialogs ✅ DONE  U4 CogEditor 🟡 partial
 
 WAVE 2:
   F2 SaveAndTest (needs F1)    I1 DfImport      I2 ThreeDoExport
@@ -175,20 +175,34 @@ UI plus the field commands.
 descriptions, the mipmap/LOD arrays, perspective/gouraud and fog; every field is
 its own undo step. Covered by `HeaderFieldTests` and both probes.
 
-### U2 — Layer panel
-- **Deps**: none · **Delphi ref**: layers in `JED_MAIN`
-- Left-panel list of `Level.Layers` with per-layer **visibility** toggles;
-  filter what `SceneAssembler` and `MapView` draw by layer.
-- Assignment already exists on the inspectors (`SetSectorLayerCommand` etc.).
+### U2 — Layer panel ✅ DONE
+`LayerVisibility` (`src/Sed.Core/Editing/`) shared by both views; checkbox list +
+"Show all" in the left panel. Hidden layers are dropped from `SceneAssembler`,
+the 2D render and every `Picker` entry point. Covered by `LayerVisibilityTests`
+and `Sed.OpsProbe`.
 
-### U3 — Template editor
-- **Deps**: none · **Delphi ref**: `U_TEMPLATES.PAS`, `U_TPLCREATE.PAS`
-- List `Level.Templates`, edit values, add/clone/delete a template.
-- Needs a typed param model rather than the current string map.
+**Remaining**: no UI to rename/add/remove layers or re-assign objects in bulk —
+per-object assignment is still via the inspectors. Episode editor not started.
 
-### U4 — COG editor
-- **Deps**: U3 · **Delphi ref**: `U_COGFORM.PAS`, `U_COGGEN.PAS`, `U_CSCENE.PAS`
-- Placed-cog symbol-value editor; COG generator; cutscene helper.
+### U3 — Template editor ✅ DONE
+`src/Sed.App/TemplateEditorWindow.cs` (Tools ▸ Templates…) + `TemplateCommands.cs`
++ `TemplateParams` (param-name → kind, transcribed from `VALUES.PAS`). Browse and
+filter, edit/add/remove parameters, override inherited values, set parent, and
+create/clone/rename/delete. Rename repoints things and child templates.
+Covered by `TemplateEditTests` and `Sed.OpsProbe`.
+
+**Remaining**: no asset pickers yet — a `model3d` or `material` parameter is a
+plain text field even though `TemplateParams` now identifies its kind.
+
+### U4 — COG editor 🟡
+- ✅ **Placed-cog symbol-value editor** — `src/Sed.Formats/Cogs/CogScript.cs` +
+  `CogScriptLibrary` + `src/Sed.App/CogEditorWindow.cs` (Tools ▸ COGs…), with
+  `CogCommands.cs` for add/delete/set-value/set-script. Values are labelled with
+  the script symbol they feed. Covered by `CogScriptTests` and `Sed.OpsProbe`.
+- ⬜ COG **generator** (`U_COGGEN.PAS`) — builds a script from a template.
+- ⬜ **Cutscene helper** (`U_CSCENE.PAS`).
+- ⬜ Asset pickers: a `thing`/`sector`/`surface` symbol is edited as a raw index;
+  it could offer a picker or jump-to, now that Find exists.
 
 ---
 
@@ -210,16 +224,26 @@ finer-grained form is wanted.
 
 ## TRACK G / T — Remaining geometry & texturing
 
-### G1 — Bridge / connect sectors
-- **Deps**: none (cleave + adjoin already exist)
-- **Delphi ref**: `LEV_UTILS.PAS`
-- Composite command: cleave two facing surfaces by each other, then adjoin the
-  overlapping results.
+### G1 — Bridge / connect surfaces ✅ DONE
+`BridgeSurfacesCommand` (**Ctrl+B**, two surfaces selected) ports `ConnectSurfaces`
+from `LEV_UTILS.PAS`: trims each face by the other's edge planes, then adjoins the
+shared region. Rolls back its own trimming if the results don't overlap.
+Covered by `BridgeTests`.
 
-### T1 — Texture flag support
-- **Deps**: none
-- `SF_DoubleRes` / `SF_HalfRes` and `FF_TexClampX/Y` must affect how the renderer
-  samples; add align-from-adjoin (stitch a surface's UVs to its neighbour's).
+**Remaining**: `ConnectSectors` (cleave sector-by-sector then adjoin every
+resulting face pair) is not implemented — only the surface-level connect.
+
+### T1 — Texture flag support 🟡
+- ✅ `FF_TexClampX`/`FF_TexClampY` affect rendering — clamp mode is part of the
+  render batch key and applied in the fragment shader.
+- ✅ Flag constants corrected against `J_LEVEL.PAS` / `GEOMETRY.PAS` and pinned
+  by `EngineFlagTests`.
+- ❌ **Do not** map `SF_DoubleRes`/`HalfRes` to a UV scale. They drive the
+  `SlideWall` COG function at runtime; the original's `GetSurfResScale` has no
+  callers and its uscale/vscale mapping in `LEVEL_IO.INC` is commented out.
+  This entry previously asserted the opposite — it was wrong.
+- ⬜ `FF_TexNoFiltering` (sampler filter per surface).
+- ⬜ Align-from-adjoin: stitch a surface's UVs to its neighbour's across a portal.
 
 ---
 

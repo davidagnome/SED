@@ -29,5 +29,12 @@ public sealed class Template
 {
     public string Name = string.Empty;
     public string Parent = string.Empty;
+
+    /// <summary>
+    /// Declaration order in the TEMPLATES section. Kept explicitly because
+    /// deleting from a Dictionary can perturb enumeration order, which would
+    /// otherwise churn the whole section on the next save.
+    /// </summary>
+    public int Order;
     public Dictionary<string, string> Values { get; } = new(StringComparer.OrdinalIgnoreCase);
 }

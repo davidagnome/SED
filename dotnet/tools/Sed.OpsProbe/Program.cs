@@ -436,6 +436,213 @@ Console.WriteLine();
     }
 }
 
+// ---- Layer visibility ----
+// Retail levels ship with a single layer, so spread the sectors and things over
+// three synthetic layers to exercise the filtering.
+Console.WriteLine();
+{
+    for (int i = 0; i < level.Sectors.Count; i++) level.Sectors[i].Layer = i % 3;
+    for (int i = 0; i < level.Things.Count; i++) level.Things[i].Layer = i % 3;
+
+    int TriangleCount(LayerVisibility? layers)
+    {
+        var assembler = new Sed.Rendering.SceneAssembler();
+        assembler.AddLevel(level, layers);
+        return assembler.Build().Mesh.Indices.Count / 3;
+    }
+
+    var visibility = new LayerVisibility();
+    int all = TriangleCount(visibility);
+
+    visibility.SetVisible(1, false);
+    int hidden = TriangleCount(visibility);
+
+    Check("hiding a layer removes its geometry from the scene", hidden < all && hidden > 0,
+        $"{all} → {hidden} triangles");
+
+    visibility.ShowAll();
+    Check("show all restores the full scene", TriangleCount(visibility) == all);
+
+    // Picking must skip hidden geometry — you cannot select what you cannot see.
+    var hiddenSector = level.Sectors.First(s => s.Layer == 1);
+    var centre = TransformVerticesCommand.Centroid(hiddenSector.Vertices);
+    var ray = new Sed.Rendering.Ray(centre + new Sed.Core.Math.Vec3(0, 0, 1000),
+        new Sed.Core.Math.Vec3(0, 0, -1));
+
+    visibility.SetVisible(1, false);
+    var hitWhenHidden = Sed.Rendering.Picker.Pick(level, ray, visibility);
+    Check("picking skips sectors on hidden layers",
+        hitWhenHidden is null || hitWhenHidden.Sector.Layer != 1,
+        hitWhenHidden is null ? "no hit" : $"hit sector on layer {hitWhenHidden.Sector.Layer}");
+
+    // Things on hidden layers are likewise unpickable.
+    var hiddenThing = level.Things.FirstOrDefault(t => t.Layer == 1);
+    if (hiddenThing is not null)
+    {
+        var tRay = new Sed.Rendering.Ray(hiddenThing.Position + new Sed.Core.Math.Vec3(0, 0, 10),
+            new Sed.Core.Math.Vec3(0, 0, -1));
+        var thingHit = Sed.Rendering.Picker.PickThing(level, tRay, 1.0, visibility);
+        Check("picking skips things on hidden layers",
+            thingHit is null || thingHit.Thing.Layer != 1);
+    }
+
+    visibility.ShowAll();
+    foreach (var s in level.Sectors) s.Layer = 0;
+    foreach (var t in level.Things) t.Layer = 0;
+}
+
+// ---- Texture clamp flags split render batches ----
+Console.WriteLine();
+{
+    int clamped = level.Sectors.SelectMany(s => s.Surfaces)
+        .Count(s => (s.FaceFlags & (FaceFlags.TexClampX | FaceFlags.TexClampY)) != 0);
+    Console.WriteLine($"clamp flags: {clamped} surface(s) carry FF_TexClampX/Y in this level");
+
+    var assembler = new Sed.Rendering.SceneAssembler();
+    assembler.AddLevel(level);
+    var scene = assembler.Build();
+
+    static int ClampOf(Surface s) =>
+        ((s.FaceFlags & FaceFlags.TexClampX) != 0 ? 1 : 0) |
+        ((s.FaceFlags & FaceFlags.TexClampY) != 0 ? 2 : 0);
+
+    // For each material, the assembler must emit one submesh per distinct
+    // (clamp, translucency, sky) combination its surfaces use.
+    var expected = level.Sectors.SelectMany(s => s.Surfaces)
+        .Where(s => s.Corners.Count >= 3 && !string.IsNullOrEmpty(s.Material))
+        .GroupBy(s => s.Material, StringComparer.OrdinalIgnoreCase)
+        .ToDictionary(
+            g => g.Key,
+            g => g.Select(s => (ClampOf(s), s.IsTranslucent,
+                    (s.SurfFlags & SurfaceFlags.SkyCeiling) != 0 ? 1 :
+                    (s.SurfFlags & SurfaceFlags.SkyHorizon) != 0 ? 2 : 0))
+                  .Distinct().Count(),
+            StringComparer.OrdinalIgnoreCase);
+
+    var actual = scene.Submeshes
+        .GroupBy(x => x.Material, StringComparer.OrdinalIgnoreCase)
+        .ToDictionary(g => g.Key, g => g.Count(), StringComparer.OrdinalIgnoreCase);
+
+    var mismatch = expected.FirstOrDefault(kv =>
+        !actual.TryGetValue(kv.Key, out int n) || n != kv.Value);
+
+    Check("each material emits one submesh per distinct clamp/blend/sky combination",
+        mismatch.Key is null,
+        mismatch.Key is null
+            ? $"{actual.Count} materials, {scene.Submeshes.Count} submeshes"
+            : $"'{mismatch.Key}' expected {mismatch.Value}, got {(actual.TryGetValue(mismatch.Key, out int got) ? got : 0)}");
+
+    // Only meaningful on a level that actually uses the flags — 01narshadda has none.
+    Check("clamped submeshes appear iff the level uses clamp flags",
+        (clamped > 0) == scene.Submeshes.Any(x => x.ClampMode != 0),
+        $"{clamped} clamped surface(s); submesh clamp modes: " +
+        string.Join(",", scene.Submeshes.Select(x => x.ClampMode).Distinct().OrderBy(x => x)));
+}
+
+// ---- Template editing ----
+Console.WriteLine();
+{
+    Console.WriteLine($"templates: {level.Templates.Count} declared, " +
+                      $"{level.Templates.Values.Count(t => t.Values.Count == 0)} with no own params");
+
+    // Pick a template that things actually instantiate, so the rename has work to do.
+    var used = level.Templates.Values
+        .Select(t => (tpl: t, users: DeleteTemplateCommand.CountUsers(level, t.Name)))
+        .Where(x => x.users > 0)
+        .OrderByDescending(x => x.users)
+        .First();
+
+    var target = used.tpl;
+    var originalName = target.Name;
+
+    history.Do(new SetTemplateValueCommand(target, "probe_param", "42"));
+    Check("adding a template parameter", target.Values["probe_param"] == "42");
+
+    history.Do(new RenameTemplateCommand(level, target, originalName + "_renamed"));
+    bool repointed = level.Things.All(t => !string.Equals(t.Template, originalName, StringComparison.OrdinalIgnoreCase))
+                     && level.Templates.Values.All(t => !string.Equals(t.Parent, originalName, StringComparison.OrdinalIgnoreCase));
+    Check($"rename repoints all {used.users} reference(s)", repointed);
+
+    // Persist and read back.
+    var tplPath = Path.Combine(Path.GetTempPath(), $"opsprobe_tpl_{args[1]}.jkl");
+    JklWriter.Save(doc, tplPath);
+    var back = JklParser.Parse(File.ReadAllText(tplPath));
+
+    Check("template count survives the round-trip", back.Templates.Count == level.Templates.Count,
+        $"{level.Templates.Count} → {back.Templates.Count}");
+    Check("renamed template and its new param persist",
+        back.Templates.TryGetValue(originalName + "_renamed", out var renamedTpl) &&
+        renamedTpl.Values.TryGetValue("probe_param", out var probeValue) && probeValue == "42");
+    Check("no thing still references the old template name",
+        back.Things.All(t => !string.Equals(t.Template, originalName, StringComparison.OrdinalIgnoreCase)));
+
+    // Every template's parent must resolve (or be the "none" sentinel).
+    int dangling = back.Templates.Values.Count(t =>
+        !string.IsNullOrEmpty(t.Parent) &&
+        !t.Parent.Equals("none", StringComparison.OrdinalIgnoreCase) &&
+        !back.Templates.ContainsKey(t.Parent));
+    Check("no template has a dangling parent after the round-trip", dangling == 0, $"{dangling} dangling");
+
+    history.Undo();   // rename
+    history.Undo();   // add param
+    Check("template edits undo", level.Templates.ContainsKey(originalName) &&
+                                 !target.Values.ContainsKey("probe_param"));
+}
+
+// ---- COG scripts + placed-cog editing ----
+Console.WriteLine();
+{
+    var scripts = new Sed.Formats.Cogs.CogScriptLibrary(
+        new[] { install.LevelArchive }, install.ResourceArchives);
+
+    int resolved = 0, unresolved = 0, layoutOk = 0, layoutBad = 0;
+    foreach (var cog in level.Cogs)
+    {
+        var script = scripts.Get(cog.Name);
+        if (script is null) { unresolved++; continue; }
+        resolved++;
+
+        // The invariant the editor relies on: a placed COG's positional values
+        // line up with the script's non-local, non-message symbols.
+        if (script.LevelValues.Count == cog.Values.Count) layoutOk++;
+        else layoutBad++;
+    }
+
+    Console.WriteLine($"cogs: {level.Cogs.Count} placed, {resolved} script(s) resolved, {unresolved} missing");
+    Check("every placed COG's script resolves from the open archives", unresolved == 0,
+        $"{unresolved} unresolved");
+    Check("value count matches the script's level-supplied symbol count",
+        layoutBad == 0, $"{layoutOk} ok, {layoutBad} mismatched");
+
+    // Symbols must actually be named — a parse that produced nothing would still
+    // "match" a zero-value cog.
+    var withValues = level.Cogs.Where(c => c.Values.Count > 0).ToList();
+    if (withValues.Count > 0)
+    {
+        var sample = withValues[0];
+        var script = scripts.Get(sample.Name)!;
+        Check($"symbols are named for '{sample.Name}'",
+            script.LevelValues.Count > 0 && script.LevelValues.All(s => s.Name.Length > 0),
+            string.Join(", ", script.LevelValues.Take(4).Select(s => $"{s.Name}({s.Type})")));
+
+        // Edit a value, save, reload.
+        var originalValues = sample.Values.ToList();
+        history.Do(new SetCogValueCommand(sample, 0, "1234"));
+
+        var cogPath = Path.Combine(Path.GetTempPath(), $"opsprobe_cog_{args[1]}.jkl");
+        JklWriter.Save(doc, cogPath);
+        var back = JklParser.Parse(File.ReadAllText(cogPath));
+
+        int index = level.Cogs.IndexOf(sample);
+        Check("COG value edits survive the JKL round-trip",
+            back.Cogs.Count == level.Cogs.Count && back.Cogs[index].Values[0] == "1234",
+            $"{back.Cogs.Count} cogs back");
+
+        history.Undo();
+        Check("COG value edit undoes", sample.Values.SequenceEqual(originalValues));
+    }
+}
+
 // ---- Consistency checker (Tools ▸ Check Consistency) on real data ----
 Console.WriteLine();
 var issues = Sed.Core.Validation.ConsistencyChecker.Check(reloaded);

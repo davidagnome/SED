@@ -69,7 +69,7 @@ public sealed unsafe class SceneRenderer : IDisposable
     private ImageView _colorView, _depthView; private Framebuffer _framebuffer;
     private VkBuffer _readback; private DeviceMemory _readbackMem;
 
-    private readonly record struct DrawItem(DescriptorSet Set, uint IndexOffset, uint IndexCount, float InvW, float InvH, bool Translucent, bool Flat, uint SkyMode);
+    private readonly record struct DrawItem(DescriptorSet Set, uint IndexOffset, uint IndexCount, float InvW, float InvH, bool Translucent, bool Flat, uint SkyMode, uint ClampMode);
     private readonly record struct MatTex(DescriptorSet Set, float InvW, float InvH);
     private struct GpuTexture { public Image Image; public DeviceMemory Memory; public ImageView View; public DescriptorSet Set; }
 
@@ -164,7 +164,7 @@ public sealed unsafe class SceneRenderer : IDisposable
         {
             var mt = !string.IsNullOrEmpty(sub.Material) && _materialCache.TryGetValue(sub.Material, out var c)
                 ? c : new MatTex(_white.Set, 1f, 1f);
-            _draws.Add(new DrawItem(mt.Set, (uint)sub.IndexOffset, (uint)sub.IndexCount, mt.InvW, mt.InvH, sub.Translucent, flat, (uint)sub.SkyMode));
+            _draws.Add(new DrawItem(mt.Set, (uint)sub.IndexOffset, (uint)sub.IndexCount, mt.InvW, mt.InvH, sub.Translucent, flat, (uint)sub.SkyMode, (uint)sub.ClampMode));
         }
     }
 
@@ -287,21 +287,22 @@ public sealed unsafe class SceneRenderer : IDisposable
     {
         var set = draw.Set;
         _vk.CmdBindDescriptorSets(cmd, PipelineBindPoint.Graphics, _layout, 0, 1, in set, 0, null);
-        PushTail(cmd, draw.InvW, draw.InvH, mode, alpha, draw.SkyMode);
+        PushTail(cmd, draw.InvW, draw.InvH, mode, alpha, draw.SkyMode, draw.ClampMode);
         _vk.CmdDrawIndexed(cmd, draw.IndexCount, 1, draw.IndexOffset, 0, 0);
     }
 
     private void BindOverlay(CommandBuffer cmd, DescriptorSet set, VkBuffer vb, VkBuffer ib, uint mode, float alpha)
     {
         _vk.CmdBindDescriptorSets(cmd, PipelineBindPoint.Graphics, _layout, 0, 1, in set, 0, null);
-        PushTail(cmd, 1f, 1f, mode, alpha, 0u);
+        PushTail(cmd, 1f, 1f, mode, alpha, 0u, 0u);
         ulong off = 0;
         _vk.CmdBindVertexBuffers(cmd, 0, 1, in vb, in off);
         _vk.CmdBindIndexBuffer(cmd, ib, 0, IndexType.Uint32);
     }
 
     // Push layout: mvp[0], camPos[64], sky[80], camAngles[96], horizScreen[112] (head 128 B);
-    // invTexSize[128], mode[136], alpha[140], brightness[144], skyMode[148] (tail 24 B).
+    // invTexSize[128], mode[136], alpha[140], brightness[144], skyMode[148],
+    // clampMode[152] (tail 32 B incl. padding).
     private void PushHead(CommandBuffer cmd, Mat4 mvp, Vec3 camPos, Vec3 camAngles, uint w, uint h)
     {
         var buf = stackalloc byte[128];
@@ -313,12 +314,13 @@ public sealed unsafe class SceneRenderer : IDisposable
         _vk.CmdPushConstants(cmd, _layout, ShaderStageFlags.VertexBit | ShaderStageFlags.FragmentBit, 0, 128, buf);
     }
 
-    private void PushTail(CommandBuffer cmd, float invW, float invH, uint mode, float alpha, uint skyMode)
+    private void PushTail(CommandBuffer cmd, float invW, float invH, uint mode, float alpha, uint skyMode, uint clampMode)
     {
-        var buf = stackalloc byte[24];
+        var buf = stackalloc byte[32];
         *(float*)(buf + 0) = invW; *(float*)(buf + 4) = invH; *(uint*)(buf + 8) = mode;
         *(float*)(buf + 12) = alpha; *(float*)(buf + 16) = _brightness; *(uint*)(buf + 20) = skyMode;
-        _vk.CmdPushConstants(cmd, _layout, ShaderStageFlags.VertexBit | ShaderStageFlags.FragmentBit, 128, 24, buf);
+        *(uint*)(buf + 24) = clampMode;
+        _vk.CmdPushConstants(cmd, _layout, ShaderStageFlags.VertexBit | ShaderStageFlags.FragmentBit, 128, 32, buf);
     }
 
     // ---- setup ----
@@ -475,7 +477,7 @@ public sealed unsafe class SceneRenderer : IDisposable
             var dyn = stackalloc DynamicState[2] { DynamicState.Viewport, DynamicState.Scissor };
             var dynState = new PipelineDynamicStateCreateInfo { SType = StructureType.PipelineDynamicStateCreateInfo, DynamicStateCount = 2, PDynamicStates = dyn };
 
-            var push = new PushConstantRange(ShaderStageFlags.VertexBit | ShaderStageFlags.FragmentBit, 0, 152);
+            var push = new PushConstantRange(ShaderStageFlags.VertexBit | ShaderStageFlags.FragmentBit, 0, 160);
             var setLayout = _setLayout;
             var layoutInfo = new PipelineLayoutCreateInfo
             {

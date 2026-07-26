@@ -27,7 +27,7 @@ math. See the repo-root analysis for the full option comparison (Lazarus/LCL vs
 | `tools/Sed.VulkanSmoke`, `Sed.TriangleProbe`, `Sed.SceneProbe`, `Sed.AppShot` | bring-up + capture probes | ✅ |
 | `tools/Sed.SaveProbe`, `Sed.OpsProbe` | save round-trip / **editing-ops round-trip on retail levels** | ✅ |
 | `tools/Sed.UiProbe` | **headless pointer-input probe** (box-select, Ctrl+click, pan routing) | ✅ |
-| `tests/Sed.Core.Tests` | xUnit | ✅ 100 passing |
+| `tests/Sed.Core.Tests` | xUnit | ✅ 210 passing |
 
 ### Rendering pipeline (verified)
 
@@ -319,6 +319,89 @@ length, char[128] name }. Names use `\` separators (e.g. `jkl\01narshadda.jkl`).
      for levels regardless of the archive's own filename. Verified by writing a
      retail level out and parsing it back through `GobArchive` (608 sectors,
      5,226 surfaces on `03katarn`).
+44. ~~Layer visibility~~ ✅ `LayerVisibility` is shared editor state (like
+     `EditHistory` and `SelectionSet`) held by `VulkanView` and handed to
+     `MapView`. Hiding a layer drops its sectors, things and lights from
+     `SceneAssembler`, from the 2D render, **and from every picker** — being able
+     to select invisible geometry would be worse than not hiding it at all.
+     Stored as "visible unless hidden" so layers added later don't default to
+     invisible. The left panel lists a checkbox per layer plus "Show all"; because
+     retail levels carry no LAYERS section yet still place everything on layer 0,
+     the list is sized by the highest layer index actually in use as well as by
+     the declared names, so those levels still have something to toggle.
+     Verified on `03katarn`: hiding one of three synthetic layers takes the scene
+     from 9,310 to 6,159 triangles and makes its sectors and things unpickable.
+45. ~~Bridge surfaces~~ ✅ `BridgeSurfacesCommand` ports `ConnectSurfaces` from
+     `LEV_UTILS.PAS`. A plain adjoin only works when two faces are already the same
+     shape; bridging trims them first — each face is cleaved by every edge plane of
+     the other (the plane through that edge with normal `edge × normal`, which
+     points out of the polygon so the cleave keeps the inside) — then adjoins the
+     shared region, leaving the offcuts as separate surfaces. Enforces the
+     original's preconditions (different sectors, neither already adjoined,
+     opposed normals, same plane) and, if the trimmed faces turn out not to
+     overlap, **rolls its own trimming back** rather than leaving half-cleaved
+     geometry behind. Bound to **Ctrl+B** with exactly two surfaces selected.
+46. ~~Engine flag corrections~~ ✅ **Bug fix.** Several constants in `EngineFlags.cs`
+     did not match the original. `SF_DoubleRes`/`SF_HalfRes` were 0x08/0x10 instead
+     of **0x10/0x20**; `SF_Water` was 0x1000 instead of **0x20000**;
+     `FF_TexClampX`/`Y` were 0x08/0x10 instead of **0x04/0x08**, and a bogus
+     `TexFlip = 0x04` sat on top of the real `FF_TexClampX`. These bits are written
+     verbatim into the JKL surface line, so a wrong value corrupts the level the
+     moment anything writes one. Nothing referenced them yet, so no data was
+     harmed — they are now transcribed from `J_LEVEL.PAS` and `GEOMETRY.PAS`,
+     with the missing IJIM and resolution flags added and the values pinned by
+     tests.
+47. ~~Texture clamp flags~~ ✅ `FF_TexClampX`/`FF_TexClampY` now affect rendering,
+     matching `PRenderGL`/`PRenderDX` which set `GL_CLAMP_TO_EDGE` /
+     `D3DTADDRESS_CLAMP`. Addressing is per-surface but a sampler is per-material,
+     so the clamp mode joins the batch key (material, translucency, sky, **clamp**)
+     and is applied in the fragment shader with a half-texel inset. Verified on
+     retail levels: each material emits exactly one submesh per distinct
+     clamp/blend/sky combination (94 materials → 147 submeshes on `03katarn`).
+48. ~~Template editor~~ ✅ `TemplateEditorWindow` (Tools ▸ Templates…) browses and
+     edits the TEMPLATES section, which already round-tripped but had no UI. The
+     detail pane separates a template's **own** parameters from those it inherits
+     through the parent chain, showing which ancestor each inherited value comes
+     from and offering a one-click override — that inheritance is the thing you
+     actually need to see when deciding whether to set a value locally.
+     `TemplateParams` types the parameter names, transcribed from the `tplNames` /
+     `TplVtypes` tables in `VALUES.PAS`: only ~16 keys are classified (material,
+     model3d, soundclass, the template-reference keys, frame, thingflags) and
+     everything else is free text, matching the original rather than inventing a
+     taxonomy. **Renaming repoints every reference** — things that instantiate the
+     template and child templates that inherit from it — because leaving them
+     behind would silently break the level; deleting reports how many references
+     it orphaned. `Template.Order` is now explicit so deleting one cannot perturb
+     Dictionary enumeration order and churn the whole section on the next save.
+49. ~~Writer: empty template parent~~ ✅ **Bug fix.** The parent occupies a fixed
+     second token on a template line, so a template with an empty parent wrote
+     `beta  size=2` — and the parser then read `size=2` as the parent name,
+     silently swallowing the first parameter. Retail levels always carry the
+     `none` sentinel so nothing hit this, but the new editor can create
+     parentless templates. Empty parents are now written as `none`.
+50. ~~Placed-COG editor~~ ✅ A placed COG in the JKL is a script name plus bare
+     positional values — unreadable on their own. `Sed.Formats.Cogs.CogScript`
+     parses a `.cog` file's `symbols` block and `CogScriptLibrary` resolves scripts
+     from the archives, so `CogEditorWindow` (Tools ▸ COGs…) can label each value
+     with the symbol it feeds, its type, and its comment.
+     The mapping rule — values correspond in order to the symbols that are neither
+     **`local`** nor **`message`** — was derived from the data, not assumed:
+     across `01narshadda`, `03katarn`, `07yun` and `09fuelstation` all **227
+     placed COGs resolve and every one's value count matches** its script's
+     level-supplied symbol count, with zero mismatches. Script lookup must search
+     the **level** archive as well as the resource archives; level-specific scripts
+     live in the episode GOB. When a script cannot be found the values stay
+     editable positionally rather than the window refusing to open, and a COG whose
+     value count disagrees with its script is flagged, since every later symbol
+     would then be reading the wrong value. `DeleteCogCommand` restores a COG at
+     its original index because scripts reference each other by COG number.
+51. ~~Case-insensitive material batching~~ ✅ **Bug fix.** `SceneAssembler` keyed
+     render batches on the material name case-sensitively, but levels declare the
+     same material under different casings — `01narshadda` has seven such pairs
+     (`01wgril1.mat` / `01WGRIL1.mat`). Since `MaterialLibrary` resolves names
+     case-insensitively, each pair uploaded the same texture twice and cost an
+     extra draw call. Normalising the batch key drops `01narshadda` from **108 to
+     104 submeshes** with an identical render.
 
 ---
 
@@ -378,7 +461,9 @@ Mirror `SAVEJKL.INC`-adjacent ops in `JED_MAIN`/`TBAR_TOOLS`:
   Cleaving a sector *by another sector's* plane is still to do.
 - ✅ **Flip surface** — `FlipSurfaceCommand` (**Ctrl+F**); insert vertex via
   `InsertSurfaceVertexCommand` (**Insert**).
-- ⬜ Bridge/connect sectors (composite of cleave + adjoin).
+- ✅ **Bridge/connect surfaces** — `BridgeSurfacesCommand` (**Ctrl+B**, with two
+  surfaces selected) trims each face by the other's edge planes, then adjoins the
+  shared region, so faces of different sizes can be joined.
 - All are `IEditCommand`s, so undo and faithful save come for free.
 
 ### P4 — Texture mapping tools ✅
@@ -390,7 +475,13 @@ auto/fit/align-from-adjoin).
 - ✅ Editor UI: a **Texturing** menu, with **Ctrl+arrows** to shift by ⅛ of the
   material, **Ctrl+±** to scale, **Ctrl+R** / **Ctrl+Shift+R** to rotate 15°, and
   **Ctrl+T** to auto-fit. Shift and auto-fit read the real material dimensions.
-- ⬜ Surface flags affecting tex (`SF_DoubleRes`/`HalfRes`, `FF_TexClampX/Y`).
+- ✅ `FF_TexClampX`/`FF_TexClampY` — clamp addressing, applied in the fragment
+  shader and split into separate render batches (2,463 of `03katarn`'s surfaces
+  use them).
+- ❌ `SF_DoubleRes`/`HalfRes` are **not** a static texture scale — they drive the
+  `SlideWall` COG function at runtime. The original's `GetSurfResScale` is dead
+  code and its uscale/vscale mapping in `LEVEL_IO.INC` is commented out, so
+  scaling UVs by them would disagree with both the game and the original editor.
 - ⬜ Align-from-adjoin (stitch).
 - ✅ Commands persist via the existing GEORESOURCE regeneration.
 
@@ -412,8 +503,13 @@ Mirror `Item_edit`, `U_TEMPLATES`/`U_TPLCREATE`, `U_COGFORM`/`U_COGGEN`, `U_CSCE
 - ✅ COGS and TEMPLATES both parse and write faithfully (milestone 24).
 - ✅ **Item editor**: the Thing inspector edits template, name, sector, position,
   orientation, layer and template values.
-- ⬜ **Template editor/creator**: no UI for viewing/adding templates.
-- ⬜ **COGs**: no placed-cog symbol-value editor, COG generator, or cutscene helper.
+- ✅ **Template editor/creator** (`TemplateEditorWindow`, Tools ▸ Templates…):
+  browse/filter, edit parameters, override inherited ones, set parent, and
+  create/clone/rename/delete templates — all undoable.
+- ✅ **Placed-COG editor** (`CogEditorWindow`, Tools ▸ COGs…): resolves each
+  placed COG's `.cog` script from the archives and labels its positional values
+  with the symbol they feed.
+- ⬜ COG generator and cutscene helper (`U_COGGEN`, `U_CSCENE`).
 - Thing create/delete/move/rotate exist ✅.
 
 ### P7 — Find / navigate / inspect ✅
@@ -438,7 +534,9 @@ Mirror `U_LHEADER`, layers, `U_MEDIT`.
 - ✅ **Level header editor** (`HeaderEditorWindow`, Tools ▸ Level Header…) —
   gravity, both sky descriptions, mipmap/LOD distance arrays, perspective/gouraud
   cutoffs and fog, every field an undoable `IEditCommand`.
-- ⬜ Layer visibility toggles; episode editor.
+- ✅ **Layer visibility toggles** — a checkbox list in the left panel; hidden
+  layers vanish from both views and from picking.
+- ⬜ Episode editor.
 
 ### P9 — File / GOB project / test-launch 🟡
 Mirror `Gob Project`, `Save JKL and Test`, `FILEOPERATIONS`.

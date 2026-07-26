@@ -16,6 +16,7 @@ layout(push_constant) uniform Push {
     float alpha;       // 140
     float brightness;  // 144
     uint skyMode;      // 148
+    uint clampMode;    // 152  bit0 = clamp U, bit1 = clamp V
 } pc;
 
 layout(location = 0) out vec3 vColor;

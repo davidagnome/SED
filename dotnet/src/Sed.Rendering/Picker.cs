@@ -1,3 +1,4 @@
+using Sed.Core.Editing;
 using Sed.Core.Math;
 using Sed.Core.Model;
 
@@ -43,12 +44,18 @@ public static class Picker
         return new Ray(camera.Position, dir.Normalized());
     }
 
-    /// <summary>Finds the nearest surface the ray hits, or null.</summary>
-    public static PickResult? Pick(Level level, Ray ray)
+    /// <summary>
+    /// Finds the nearest surface the ray hits, or null. Sectors on hidden layers
+    /// are skipped when <paramref name="layers"/> is given — you should not be
+    /// able to select what you cannot see.
+    /// </summary>
+    public static PickResult? Pick(Level level, Ray ray, LayerVisibility? layers = null)
     {
         PickResult? best = null;
         foreach (var sector in level.Sectors)
         {
+            if (layers is not null && !layers.IsVisible(sector)) continue;
+
             foreach (var surface in sector.Surfaces)
             {
                 if (surface.Corners.Count < 3) continue;
@@ -69,11 +76,12 @@ public static class Picker
     }
 
     /// <summary>Finds the nearest thing whose marker sphere (radius) the ray hits, or null.</summary>
-    public static ThingHit? PickThing(Level level, Ray ray, double radius)
+    public static ThingHit? PickThing(Level level, Ray ray, double radius, LayerVisibility? layers = null)
     {
         ThingHit? best = null;
         foreach (var thing in level.Things)
         {
+            if (layers is not null && !layers.IsVisible(thing)) continue;
             if (RaySphere(ray, thing.Position, radius, out double t) &&
                 (best is null || t < best.Distance))
             {
@@ -84,11 +92,12 @@ public static class Picker
     }
 
     /// <summary>Finds the nearest light whose marker sphere (radius) the ray hits, or null.</summary>
-    public static LightHit? PickLight(Level level, Ray ray, double radius)
+    public static LightHit? PickLight(Level level, Ray ray, double radius, LayerVisibility? layers = null)
     {
         LightHit? best = null;
         foreach (var light in level.Lights)
         {
+            if (layers is not null && !layers.IsVisible(light)) continue;
             if (RaySphere(ray, light.Position, radius, out double t) &&
                 (best is null || t < best.Distance))
             {
@@ -99,13 +108,16 @@ public static class Picker
     }
 
     /// <summary>Finds the nearest sector vertex whose pick sphere (radius) the ray hits, or null.</summary>
-    public static VertexHit? PickVertex(Level level, Ray ray, double radius)
+    public static VertexHit? PickVertex(Level level, Ray ray, double radius, LayerVisibility? layers = null)
     {
         VertexHit? best = null;
         foreach (var sector in level.Sectors)
+        {
+            if (layers is not null && !layers.IsVisible(sector)) continue;
             foreach (var v in sector.Vertices)
                 if (RaySphere(ray, v.Position, radius, out double t) && (best is null || t < best.Distance))
                     best = new VertexHit(sector, v, t);
+        }
         return best;
     }
 

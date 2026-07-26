@@ -42,6 +42,13 @@ public sealed class MapView : Control
     /// </summary>
     public SelectionSet? Selection { get; set; }
 
+    /// <summary>Shared layer visibility; hidden layers are neither drawn nor picked.</summary>
+    public LayerVisibility? Layers { get; set; }
+
+    private bool Visible(Sector s) => Layers is null || Layers.IsVisible(s);
+    private bool Visible(Thing t) => Layers is null || Layers.IsVisible(t);
+    private bool Visible(Light l) => Layers is null || Layers.IsVisible(l);
+
     public Vertex? SelectedVertex => Selection?.PrimaryVertex;
     public Thing? SelectedThing => Selection?.PrimaryThing;
     public Surface? SelectedSurface => Selection?.PrimarySurface;
@@ -181,6 +188,8 @@ public sealed class MapView : Control
         var geo = new StreamGeometry();
         using (var g = geo.Open())
             foreach (var sector in _level.Sectors)
+            {
+                if (!Visible(sector)) continue;
                 foreach (var surf in sector.Surfaces)
                 {
                     if (surf.Corners.Count < 2) continue;
@@ -189,6 +198,7 @@ public sealed class MapView : Control
                         g.LineTo(ToScreen(surf.Corners[i].Vertex.Position));
                     g.EndFigure(true);
                 }
+            }
         context.DrawGeometry(null, EdgePen, geo);
 
         // Highlight every selected surface, not just the primary one.
@@ -228,6 +238,7 @@ public sealed class MapView : Control
         // Things
         foreach (var thing in _level.Things)
         {
+            if (!Visible(thing)) continue;
             var c = ToScreen(thing.Position);
             var brush = Selection?.Contains(thing) == true ? SelectBrush : ThingBrush;
             context.FillRectangle(brush, new Rect(c.X - 3, c.Y - 3, 6, 6));
@@ -238,6 +249,7 @@ public sealed class MapView : Control
         if (Mode == EditMode.Light)
             foreach (var light in _level.Lights)
             {
+                if (!Visible(light)) continue;
                 var c = ToScreen(light.Position);
                 var brush = Selection?.Contains(light) == true ? SelectBrush : LightBrush;
                 var diamond = new StreamGeometry();
@@ -310,6 +322,7 @@ public sealed class MapView : Control
         Thing? found = null;
         foreach (var thing in _level.Things)
         {
+            if (!Visible(thing)) continue;
             double d = ScreenDist(ToScreen(thing.Position), screen);
             if (d < best) { best = d; found = thing; }
         }
@@ -323,6 +336,7 @@ public sealed class MapView : Control
         Light? found = null;
         foreach (var light in _level.Lights)
         {
+            if (!Visible(light)) continue;
             double d = ScreenDist(ToScreen(light.Position), screen);
             if (d < best) { best = d; found = light; }
         }
@@ -335,11 +349,14 @@ public sealed class MapView : Control
         double best = 7;
         Vertex? found = null;
         foreach (var sector in _level.Sectors)
+        {
+            if (!Visible(sector)) continue;
             foreach (var v in sector.Vertices)
             {
                 double d = ScreenDist(ToScreen(v.Position), screen);
                 if (d < best) { best = d; found = v; }
             }
+        }
         return found;
     }
 
@@ -348,12 +365,14 @@ public sealed class MapView : Control
         if (_level is null) return null;
         var (mu, mv) = Unproject(screen);
         foreach (var sector in _level.Sectors)
+        {
+            if (!Visible(sector)) continue;
             foreach (var surf in sector.Surfaces)
             {
                 if (surf.Corners.Count < 3) continue;
-                bool inside = PointInPolygon(mu, mv, surf);
-                if (inside) return surf;
+                if (PointInPolygon(mu, mv, surf)) return surf;
             }
+        }
         return null;
     }
 
@@ -572,7 +591,7 @@ public sealed class MapView : Control
             {
                 case EditMode.Vertex:
                     foreach (var sector in _level.Sectors)
-                        foreach (var v in sector.Vertices)
+                        foreach (var v in Visible(sector) ? sector.Vertices : Enumerable.Empty<Vertex>())
                             if (box.Contains(ToScreen(v.Position)))
                             {
                                 ActiveSector = sector;
@@ -582,25 +601,26 @@ public sealed class MapView : Control
 
                 case EditMode.Thing:
                     foreach (var t in _level.Things)
-                        if (box.Contains(ToScreen(t.Position)))
+                        if (Visible(t) && box.Contains(ToScreen(t.Position)))
                             Selection.Add(t);
                     break;
 
                 case EditMode.Light:
                     foreach (var l in _level.Lights)
-                        if (box.Contains(ToScreen(l.Position)))
+                        if (Visible(l) && box.Contains(ToScreen(l.Position)))
                             Selection.Add(l);
                     break;
 
                 case EditMode.Sector:
                     foreach (var sector in _level.Sectors)
-                        if (sector.Vertices.Count > 0 && sector.Vertices.All(v => box.Contains(ToScreen(v.Position))))
+                        if (Visible(sector) && sector.Vertices.Count > 0 &&
+                            sector.Vertices.All(v => box.Contains(ToScreen(v.Position))))
                             Selection.Add(sector);
                     break;
 
                 default:
                     foreach (var sector in _level.Sectors)
-                        foreach (var surf in sector.Surfaces)
+                        foreach (var surf in Visible(sector) ? sector.Surfaces : Enumerable.Empty<Surface>())
                             if (surf.Corners.Count > 0 &&
                                 surf.Corners.All(c => box.Contains(ToScreen(c.Vertex.Position))))
                             {

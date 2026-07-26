@@ -19,6 +19,12 @@ public sealed class Submesh
     public bool Translucent { get; init; }
     /// <summary>0 = normal, 1 = ceiling sky, 2 = horizon sky (UV computed in shader).</summary>
     public int SkyMode { get; init; }
+
+    /// <summary>
+    /// Texture addressing: bit 0 clamps U, bit 1 clamps V (FF_TexClampX/Y).
+    /// Surfaces that differ here batch separately, since addressing is per-draw.
+    /// </summary>
+    public int ClampMode { get; init; }
 }
 
 /// <summary>

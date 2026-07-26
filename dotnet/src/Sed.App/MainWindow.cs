@@ -28,6 +28,7 @@ public class MainWindow : Window
     private readonly VulkanView _view;
     private readonly MapView _mapView = new();
     private readonly ListBox _levelList;
+    private readonly ItemsControl _layerList = new();
     private readonly ListBox _materialList;
     private readonly TextBox _materialFilter;
     private readonly TextBlock _sidePanelHeader;
@@ -48,6 +49,9 @@ public class MainWindow : Window
     private ConsistencyWindow? _consistencyWindow;
     private FindWindow? _findWindow;
     private HeaderEditorWindow? _headerWindow;
+    private TemplateEditorWindow? _templateWindow;
+    private CogEditorWindow? _cogWindow;
+    private Sed.Formats.Cogs.CogScriptLibrary? _cogScripts;
 
     public MainWindow()
     {
@@ -73,6 +77,7 @@ public class MainWindow : Window
         // either pane is immediately reflected in the other.
         _mapView.History = _view.History;
         _mapView.Selection = _view.Selection;
+        _mapView.Layers = _view.Layers;
         _mapView.SelectionChanged = desc => { if (desc is not null) _status.Text = desc; };
 
         _view.Selection.Changed += () =>
@@ -109,6 +114,11 @@ public class MainWindow : Window
         var sideContent = new DockPanel { Width = 240 };
         DockPanel.SetDock(_sidePanelHeader, Dock.Top);
         sideContent.Children.Add(_sidePanelHeader);
+
+        var layerPanel = BuildLayerPanel();
+        DockPanel.SetDock(layerPanel, Dock.Bottom);
+        sideContent.Children.Add(layerPanel);
+
         sideContent.Children.Add(_levelList);
         var sidePanel = new Border { Background = new SolidColorBrush(Color.FromRgb(0x1e, 0x1e, 0x22)), Child = sideContent };
         DockPanel.SetDock(sidePanel, Dock.Left);
@@ -336,12 +346,16 @@ public class MainWindow : Window
         }
 
         _currentLevel = level;
+        _view.Layers.ShowAll();      // a new level starts fully visible
         _view.Materials = _currentDoc?.Materials ?? new List<string>();
         _view.SetLevel(level, textures, models, paletteRgb, lightTable);
         _mapView.SetLevel(level);
         _consistencyWindow?.Run();
         _findWindow?.SetLevel(level);
         _headerWindow?.SetHeader(level.Header);
+        _templateWindow?.SetLevel(level);
+        _cogWindow?.SetLevel(level);
+        PopulateLayers();
         PopulateMaterials();
         int surfaces = level.Sectors.Sum(s => s.Surfaces.Count);
         _status.Text = $"{name} — {level.Sectors.Count} sectors, {surfaces} surfaces, " +
@@ -492,11 +506,114 @@ public class MainWindow : Window
         _adhocResourceGob?.Dispose(); _adhocResourceGob = null;
         _levelArchive = null;
         _materialArchives = Array.Empty<GobArchive>();
+        _cogScripts = null;
         _modelLibrary = null;
         _matLibrary = null;
         _materialList.ItemsSource = null;
         _levels = new();
         _levelList.ItemsSource = null;
+    }
+
+    /// <summary>
+    /// Layer visibility list (mirrors the original's layer bar). Unchecking a layer
+    /// removes its sectors, things and lights from both views and from picking,
+    /// so a complex level can be worked on a floor at a time. Visibility is editor
+    /// state — it changes nothing that gets saved.
+    /// </summary>
+    private Control BuildLayerPanel()
+    {
+        var header = new TextBlock
+        {
+            Margin = new Thickness(10, 8, 10, 4),
+            Text = "Layers",
+            Foreground = Brushes.Gray,
+        };
+
+        var showAll = new Button
+        {
+            Content = "Show all",
+            FontSize = 11,
+            Padding = new Thickness(6, 1),
+            Margin = new Thickness(10, 0, 10, 6),
+        };
+        showAll.Click += (_, _) => _view.Layers.ShowAll();
+
+        var content = new DockPanel { MaxHeight = 190 };
+        DockPanel.SetDock(header, Dock.Top);
+        content.Children.Add(header);
+        DockPanel.SetDock(showAll, Dock.Bottom);
+        content.Children.Add(showAll);
+        content.Children.Add(_layerList);
+
+        // Rebuild the checkboxes when visibility changes elsewhere (e.g. Show all).
+        _view.Layers.Changed += RefreshLayerChecks;
+
+        return new Border
+        {
+            BorderBrush = new SolidColorBrush(Color.FromRgb(0x33, 0x33, 0x3c)),
+            BorderThickness = new Thickness(0, 1, 0, 0),
+            Child = content,
+        };
+    }
+
+    /// <summary>
+    /// Rebuilds the layer checkbox list. Retail levels ship without a LAYERS
+    /// section but still place everything on layer 0, so the list is sized by the
+    /// highest layer index actually in use as well as by the declared names —
+    /// otherwise those levels would show nothing to toggle.
+    /// </summary>
+    private void PopulateLayers()
+    {
+        _layerList.Items.Clear();
+        if (_currentLevel is not { } level) return;
+
+        var layers = level.Layers;
+        int used = 0;
+        foreach (var s in level.Sectors) used = System.Math.Max(used, s.Layer + 1);
+        foreach (var t in level.Things) used = System.Math.Max(used, t.Layer + 1);
+        foreach (var l in level.Lights) used = System.Math.Max(used, l.Layer + 1);
+        int count = System.Math.Max(layers.Count, used);
+
+        for (int i = 0; i < count; i++)
+        {
+            int index = i;
+            var declared = i < layers.Count ? layers[i] : string.Empty;
+            var name = string.IsNullOrWhiteSpace(declared) ? $"Layer {i}" : declared;
+            var box = new CheckBox
+            {
+                Content = $"{i}: {name}",
+                IsChecked = _view.Layers.IsVisible(i),
+                FontSize = 11,
+                Margin = new Thickness(10, 0),
+            };
+            box.IsCheckedChanged += (_, _) => _view.Layers.SetVisible(index, box.IsChecked ?? true);
+            _layerList.Items.Add(box);
+        }
+
+        if (count == 0)
+            _layerList.Items.Add(new TextBlock
+            {
+                Text = "(no layers)",
+                Foreground = Brushes.DimGray,
+                FontSize = 11,
+                Margin = new Thickness(10, 2),
+            });
+    }
+
+    /// <summary>Syncs the checkboxes after a visibility change made elsewhere.</summary>
+    private void RefreshLayerChecks()
+    {
+        int i = 0;
+        foreach (var item in _layerList.Items)
+        {
+            if (item is CheckBox box)
+            {
+                bool visible = _view.Layers.IsVisible(i);
+                if (box.IsChecked != visible) box.IsChecked = visible;
+                i++;
+            }
+        }
+        _mapView.InvalidateVisual();
     }
 
     private Menu BuildMenu()
@@ -599,6 +716,8 @@ public class MainWindow : Window
             () => _view.MakeAdjoinStep()));
         geometry.Items.Add(Item("_Remove Adjoin", new KeyGesture(Key.J, KeyModifiers.Control | KeyModifiers.Shift),
             () => _view.RemoveSelectedAdjoin()));
+        geometry.Items.Add(Item("_Bridge Two Surfaces", new KeyGesture(Key.B, KeyModifiers.Control),
+            () => _view.BridgeSelectedSurfaces()));
 
         return geometry;
     }
@@ -666,6 +785,56 @@ public class MainWindow : Window
         var window = new HeaderEditorWindow(level.Header, _view.History);
         window.Closed += (_, _) => _headerWindow = null;
         _headerWindow = window;
+        window.Show(this);
+    }
+
+    /// <summary>
+    /// Opens the placed-COG editor. Script resolution needs both the level archive
+    /// (level-specific scripts) and the resource archives (shared ones).
+    /// </summary>
+    private void ShowCogEditor()
+    {
+        if (_currentLevel is not { } level)
+        {
+            _status.Text = "Open a level first, then edit its COGs.";
+            return;
+        }
+
+        if (_cogWindow is not null)
+        {
+            _cogWindow.Refresh();
+            _cogWindow.Activate();
+            return;
+        }
+
+        _cogScripts ??= new Sed.Formats.Cogs.CogScriptLibrary(
+            new[] { _levelArchive }, _materialArchives);
+
+        var window = new CogEditorWindow(level, _view.History, _cogScripts);
+        window.Closed += (_, _) => _cogWindow = null;
+        _cogWindow = window;
+        window.Show(this);
+    }
+
+    /// <summary>Opens the template browser/editor for the loaded level.</summary>
+    private void ShowTemplateEditor()
+    {
+        if (_currentLevel is not { } level)
+        {
+            _status.Text = "Open a level first, then edit its templates.";
+            return;
+        }
+
+        if (_templateWindow is not null)
+        {
+            _templateWindow.Refresh();
+            _templateWindow.Activate();
+            return;
+        }
+
+        var window = new TemplateEditorWindow(level, _view.History);
+        window.Closed += (_, _) => _templateWindow = null;
+        _templateWindow = window;
         window.Show(this);
     }
 

@@ -159,10 +159,15 @@ public static class JklWriter
     private static List<string> GenerateTemplates(Level level)
     {
         var lines = new List<string> { "SECTION: TEMPLATES", "", $"World templates {level.Templates.Count}" };
-        foreach (var tpl in level.Templates.Values)
+        foreach (var tpl in level.Templates.Values.OrderBy(t => t.Order))
         {
+            // The parent occupies a fixed second token, so an empty one must be
+            // written as "none" (the same sentinel THINGS uses). Emitting nothing
+            // would shift the first parameter into the parent slot and lose it.
+            var parent = string.IsNullOrWhiteSpace(tpl.Parent) ? "none" : tpl.Parent;
+
             var sb = new StringBuilder();
-            sb.Append(tpl.Name).Append(' ').Append(tpl.Parent);
+            sb.Append(tpl.Name).Append(' ').Append(parent);
             foreach (var (k, v) in tpl.Values)
                 sb.Append(' ').Append(k).Append('=').Append(v);
             lines.Add(sb.ToString());

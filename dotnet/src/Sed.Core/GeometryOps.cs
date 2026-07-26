@@ -44,6 +44,58 @@ public static class GeometryOps
         return max > min ? max - min : 0;
     }
 
+    /// <summary>
+    /// True when a point (assumed to lie on the surface's plane) falls inside the
+    /// polygon. Tests in 2D after dropping the axis the normal is most aligned
+    /// with — the projection that keeps the polygon largest and avoids degenerate
+    /// edge-on cases.
+    /// </summary>
+    public static bool PointOnSurface(Surface surface, Vec3 point)
+    {
+        var n = surface.Normal;
+        if (n.LengthSquared < 1e-12)
+        {
+            surface.RecalcNormal();
+            n = surface.Normal;
+        }
+
+        double ax = System.Math.Abs(n.X), ay = System.Math.Abs(n.Y), az = System.Math.Abs(n.Z);
+        int drop = az >= ax && az >= ay ? 2 : ay >= ax ? 1 : 0;
+
+        var (px, py) = Flatten(point, drop);
+        bool inside = false;
+
+        var corners = surface.Corners;
+        for (int i = 0, j = corners.Count - 1; i < corners.Count; j = i++)
+        {
+            var (ix, iy) = Flatten(corners[i].Vertex.Position, drop);
+            var (jx, jy) = Flatten(corners[j].Vertex.Position, drop);
+
+            if ((iy > py) != (jy > py) &&
+                px < (jx - ix) * (py - iy) / (jy - iy + 1e-30) + ix)
+                inside = !inside;
+        }
+
+        return inside;
+    }
+
+    /// <summary>Drops one axis, projecting a point into the plane's dominant 2D basis.</summary>
+    private static (double u, double v) Flatten(Vec3 p, int drop) => drop switch
+    {
+        0 => (p.Y, p.Z),
+        1 => (p.X, p.Z),
+        _ => (p.X, p.Y),
+    };
+
+    /// <summary>Centroid of a surface's corners.</summary>
+    public static Vec3 Centroid(Surface surface)
+    {
+        if (surface.Corners.Count == 0) return Vec3.Zero;
+        var sum = Vec3.Zero;
+        foreach (var c in surface.Corners) sum += c.Vertex.Position;
+        return sum * (1.0 / surface.Corners.Count);
+    }
+
     /// <summary>Classifies a point relative to a plane: -1 (behind), 0 (on), +1 (front).</summary>
     public static int ClassifyPoint(Vec3 point, Vec3 planeNormal, Vec3 planePoint, double epsilon = 1e-6)
     {

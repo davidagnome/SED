@@ -15,6 +15,7 @@ layout(push_constant) uniform Push {
     float alpha;
     float brightness;
     uint skyMode;
+    uint clampMode;
 } pc;
 
 layout(location = 0) in vec3 vColor;
@@ -46,6 +47,16 @@ void main()
         uv = vec2(nx * rc - ny * rs + pc.camAngles.x / 360.0 + pc.horizScreen.x,
                   ny * rc + nx * rs + pc.camAngles.y / 360.0 + pc.horizScreen.y);
         light = 1.0;
+    }
+
+    // FF_TexClampX / FF_TexClampY: clamp addressing instead of repeat. Done here
+    // rather than with a sampler because addressing is a per-surface property and
+    // surfaces sharing a material share one sampler. Half-texel inset keeps the
+    // clamped edge off the neighbouring row/column of the palette-index texture.
+    if (pc.clampMode != 0u) {
+        vec2 half_texel = 0.5 * pc.invTexSize;
+        if ((pc.clampMode & 1u) != 0u) uv.x = clamp(uv.x, half_texel.x, 1.0 - half_texel.x);
+        if ((pc.clampMode & 2u) != 0u) uv.y = clamp(uv.y, half_texel.y, 1.0 - half_texel.y);
     }
 
     int idx = int(texture(matTex, uv).r * 255.0 + 0.5);
