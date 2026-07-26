@@ -26,6 +26,7 @@ math. See the repo-root analysis for the full option comparison (Lazarus/LCL vs
 | `tools/Sed.GobTool`, `Sed.JklProbe`, `Sed.MatTool`, `Sed.LevelRender` | GOB list / JKL render / MAT→PNG / **textured level → PNG** | ✅ |
 | `tools/Sed.VulkanSmoke`, `Sed.TriangleProbe`, `Sed.SceneProbe`, `Sed.AppShot` | bring-up + capture probes | ✅ |
 | `tools/Sed.SaveProbe`, `Sed.OpsProbe` | save round-trip / **editing-ops round-trip on retail levels** | ✅ |
+| `tools/Sed.UiProbe` | **headless pointer-input probe** (box-select, Ctrl+click, pan routing) | ✅ |
 | `tests/Sed.Core.Tests` | xUnit | ✅ 100 passing |
 
 ### Rendering pipeline (verified)
@@ -209,6 +210,92 @@ length, char[128] name }. Names use `\` separators (e.g. `jkl\01narshadda.jkl`).
      it averages numerical noise so near-planar surfaces stop being flagged.
      Retail levels now report **0 issues** across 15,676 surfaces; genuinely
      zero-area surfaces still yield a zero normal and are still flagged.
+33. ~~Multi-selection~~ ✅ `SelectionSet` (`Sed.Core/Editing`) — insertion-ordered,
+     reference-identity sets of vertices/things/surfaces/sectors with add/remove/
+     toggle/clear, a `Changed` event, a `Defer()` scope that coalesces bulk updates
+     into one notification, and `Prune(level)` to drop objects an undo or delete
+     removed. The **most recently added** item of each kind is the *primary*, which
+     is what the inspector and the surface-mode operations edit.
+     One instance is owned by `VulkanView` and handed to `MapView` (exactly as
+     `EditHistory` already was), so the 3D and 2D panes share one selection.
+     **Ctrl/Cmd+click** toggles, plain click replaces, **Esc** clears, **Ctrl+A**
+     selects the active sector's surfaces. Move (arrows and 2D drag), rotate,
+     scale, delete and set-material now apply to the entire selection as a single
+     undo step via `CompositeCommand`; `AffectedVertices()` unions the vertices
+     implied by selected surfaces and sectors, deduplicated so a vertex shared by
+     two selected faces moves once rather than twice.
+34. ~~Box-select~~ ✅ `MapView` rubber-bands on a plain drag over empty space
+     (Ctrl+drag extends); panning moved to **middle-drag / Shift+drag / Alt+drag**,
+     matching the original's 2D panes. Points (vertices, things) count when they
+     fall inside the rectangle; surfaces and sectors must be **fully** enclosed, so
+     sweeping a band across a level does not drag in half-visible geometry. The
+     bulk add runs inside `Selection.Defer()`, so selecting hundreds of objects
+     raises one `Changed` event.
+35. ~~Copy / paste~~ ✅ `LevelFragment` (clipboard) + `PasteFragmentCommand`.
+     **Ctrl+C** snapshots the selection — selected sectors whole, selected surfaces
+     contributing their owning sector, plus things with their template values.
+     **Ctrl+V** pastes offset by the fragment's own width so a duplicated room
+     lands *beside* its source, then selects the result for immediate dragging;
+     **Ctrl+D** duplicates in one step. Two correctness properties the tests pin
+     down: JK pools world vertices, so cloning always creates **fresh `Vertex`
+     objects** rather than aliasing the source (otherwise editing the copy would
+     corrupt the original), and adjoins are **remapped when both sides are inside
+     the fragment and cleared otherwise**, so a pasted room is sealed instead of
+     opening through a portal into the room it came from. Capture is a snapshot,
+     so later edits to the source do not leak into the clipboard, and each paste
+     re-clones so repeated pastes stay independent.
+36. ~~Headless UI probe~~ ✅ `tools/Sed.UiProbe` drives `MapView`'s real pointer
+     path with simulated mouse input (`Avalonia.Headless`), covering box-select,
+     Ctrl+drag extension, click-to-clear, full-containment semantics and
+     pan-vs-select modifier routing — interaction logic that lives in a view and
+     cannot be reached from `Sed.Core` unit tests.
+37. ~~Lighting calculation~~ ✅ `Sed.Core.Lighting.LightCalculator` ports
+     `CalcLighting`/`CalcSectorAmbients` from `LEV_UTILS.PAS`. Per light and
+     surface: the light must be in front of the plane; per corner it must be
+     within range; the contribution is **`intensity · ((range − dist) / range)²`**
+     — quadratic over the *remaining* range, not inverse-square. JK accumulates
+     greyscale, MotS/IJIM accumulate RGB. A shadow ray from light to vertex is
+     blocked by any surface it crosses, except adjoins without
+     `SAF_BlockLight` — light passes through portals by default — and
+     `LF_NoBlock` lights ignore occluders entirely. Afterwards each sector's
+     ambient becomes the brighter of its mean vertex light and mean surface
+     extra-light, skipping `SECF_NOAMBIENTLIGHT` sectors.
+     `CalculateLightingCommand` makes a whole bake **one undo step**, restoring
+     every corner intensity and sector ambient exactly, so a bake can be tried
+     and rejected without losing hand-authored lighting. Results land in
+     `Surface.Corner.Intensity` and so persist through GEORESOURCE regeneration
+     with no writer change. **Tools ▸ Calculate Lighting** (**F9**; Shift+F9
+     skips shadows) scopes to the selection when there is one, else the level.
+     Shadow queries go through a **uniform spatial grid** over surface bounds —
+     without it each ray scanned all ~10k surfaces. Same results, 7× faster:
+     a full bake of `09fuelstation` (968 sectors, 47,884 vertices, 40 lights)
+     takes **486 ms**.
+38. ~~Box sector winding fix~~ ✅ `SectorFactory.CreateBox` wound three of its six
+     faces backwards, so new box rooms were half-inverted. Retail data settles the
+     convention beyond doubt: **all 20,250 sector surfaces** across `07yun`,
+     `01narshadda`, `03katarn` and `09fuelstation` face **inward**, with zero mixed
+     sectors. The flipped faces meant the lighting pass skipped surfaces it thought
+     the light was behind, extrude pushed the wrong way, and auto-texture chose its
+     projection axis from an inverted normal. All six faces now point inward, pinned
+     by a test.
+39. ~~Lights as selectable entities~~ ✅ `SelectionSet` gained a `Light` bucket, so
+     lights behave like every other object: `Picker.PickLight` hit-tests them in the
+     3D view and `MapView` draws them as diamonds and box-selects them, both only in
+     **Light** mode (a level can carry hundreds, and they would bury the geometry
+     otherwise). `CreateLightCommand` (**Insert**, cloning the selected light's
+     settings), `DeleteLightCommand` (which restores a light to its **original list
+     index** on undo, because COGs reference lights by number) and `MoveLightCommand`
+     (a delta, so several lights move as one `CompositeCommand`). `LevelFragment`
+     now copies lights, and the Light inspector is finally reachable — it existed
+     but `UpdateInspectorTarget` had nothing to give it.
+40. ~~Writer: append absent sections~~ ✅ **Bug fix.** `JklWriter.AddSection` only
+     rewrote sections it could already find in the source, so anything the source
+     lacked was silently dropped. Every retail level ships *without* LIGHTS and
+     LAYERS — those are editor-authored — which meant lights placed in the editor
+     **vanished on save**, exactly the workflow milestones 37–39 exist to support.
+     Missing sections with content are now appended at the end of the file;
+     sections with no content are still skipped, so opening and saving an untouched
+     level does not sprout empty ones.
 
 ---
 
@@ -235,12 +322,23 @@ The Delphi editor edits in **2D top/side/front map panes with a grid** (`JED_MAI
 - ⬜ Box-select; measurement/coords readout; vertex dots for all sectors (currently
   only the active sector).
 
-### P2 — Selection model: multi-select + copy/paste ⬜
+### P2 — Selection model: multi-select + copy/paste ✅
 Mirror `u_multisel.pas`, `u_copypaste.pas`.
-- Multi-selection set (things/surfaces/sectors/vertices); box-select in the map view.
-- Transform commands already accept vertex sets — extend selection plumbing to feed them.
-- Copy/paste and **paste-in-place** of things and sector geometry (clipboard = a
-  serialized fragment of the model); undoable.
+- ✅ **Multi-selection set** (`SelectionSet`) holding things/surfaces/sectors/
+  vertices, shared by both views. **Ctrl/Cmd+click** adds and removes; plain click
+  replaces; **Esc** or Edit ▸ Select None clears; **Ctrl+A** grabs the active
+  sector's surfaces. Move/rotate/scale/delete/set-material all act on the whole
+  selection as **one undo step** (`CompositeCommand`).
+- ✅ **Box-select** in the map view — a plain drag on empty space rubber-bands;
+  Ctrl+drag adds to the selection; pan moved to middle-drag / Shift+drag / Alt+drag.
+  Points must fall inside; surfaces and sectors must be *fully* enclosed.
+- ✅ Transform commands accept vertex sets; `SelectionSet.AffectedVertices()`
+  feeds them, deduplicating vertices shared between selected surfaces.
+- ✅ **Copy/paste** (`LevelFragment` + `PasteFragmentCommand`) — **Ctrl+C** /
+  **Ctrl+V** / **Ctrl+D**. Deep-clones sectors (vertices, surfaces, UVs, flags) and
+  things (including template values); pastes offset by the fragment's own width so
+  a duplicated room lands beside its source; selects what it pasted; undoable.
+- ✅ Lights are copied too (milestone 39).
 
 ### P3 — Core geometry operations ✅
 Mirror `SAVEJKL.INC`-adjacent ops in `JED_MAIN`/`TBAR_TOOLS`:
@@ -273,15 +371,18 @@ auto/fit/align-from-adjoin).
 - ⬜ Align-from-adjoin (stitch).
 - ✅ Commands persist via the existing GEORESOURCE regeneration.
 
-### P5 — Lighting calculation ⬜
+### P5 — Lighting calculation ✅
 Mirror `Calculate &Lighting` (`lev_utils.pas`).
-- Static light propagation from point lights to per-vertex intensities
-  (`Sed.Lights` → `Surface.Corner.Intensity`), respecting sector ambient/extra.
-  **This is the main remaining gap** — nothing computes lighting from the LIGHTS
-  data today.
+- ✅ Static light propagation from point lights to per-vertex intensities
+  (`Sed.Core.Lighting.LightCalculator` → `Surface.Corner.Intensity`), with the
+  engine's falloff, the sector-ambient pass, and shadow ray-casting through
+  geometry. **Tools ▸ Calculate Lighting** (**F9**, Shift+F9 for no shadows).
 - ✅ LIGHTS parse + faithful write (milestone 24); light entities are editable
   through the Light inspector.
-- Per-vertex/sector/surface light editing exists 🟡 (`SetVertexLight`/`SetSectorAmbient`).
+- ✅ Per-vertex/sector/surface light editing (`SetVertexLight`/`SetSectorAmbient`).
+- ✅ **Lights are selectable entities** — pickable and box-selectable in Light
+  mode in both views, with create (**Insert**), delete, move (arrows / 2D drag),
+  copy-paste, and the Light inspector bound to the primary selection.
 
 ### P6 — Things, templates, COGs (gameplay data) 🟡
 Mirror `Item_edit`, `U_TEMPLATES`/`U_TPLCREATE`, `U_COGFORM`/`U_COGGEN`, `U_CSCENE`.

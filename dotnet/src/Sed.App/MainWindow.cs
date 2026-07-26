@@ -483,6 +483,10 @@ public class MainWindow : Window
         edit.Items.Add(undo);
         edit.Items.Add(redo);
         edit.Items.Add(new Separator());
+        edit.Items.Add(Item("_Copy", new KeyGesture(Key.C, KeyModifiers.Control), () => _view.CopySelection()));
+        edit.Items.Add(Item("_Paste", new KeyGesture(Key.V, KeyModifiers.Control), () => _view.PasteClipboard()));
+        edit.Items.Add(Item("_Duplicate", new KeyGesture(Key.D, KeyModifiers.Control), () => _view.DuplicateSelection()));
+        edit.Items.Add(new Separator());
         edit.Items.Add(Item("Select All in _Sector", new KeyGesture(Key.A, KeyModifiers.Control),
             () => _view.SelectActiveSectorSurfaces()));
         edit.Items.Add(Item("Select _None", new KeyGesture(Key.Escape), () => _view.ClearSelection()));
@@ -587,6 +591,11 @@ public class MainWindow : Window
     private MenuItem BuildToolsMenu()
     {
         var tools = new MenuItem { Header = "T_ools" };
+        tools.Items.Add(Item("Calculate _Lighting", new KeyGesture(Key.F9),
+            () => _view.CalculateLighting()));
+        tools.Items.Add(Item("Calculate Lighting (_no shadows)", new KeyGesture(Key.F9, KeyModifiers.Shift),
+            () => _view.CalculateLighting(castShadows: false)));
+        tools.Items.Add(new Separator());
         tools.Items.Add(Item("_Check Consistency\u2026", new KeyGesture(Key.F8), ShowConsistency));
         return tools;
     }
@@ -731,7 +740,7 @@ public class MainWindow : Window
             EditMode.Surface => (object?)_view.SelectedSurface,
             EditMode.Vertex => (object?)_view.SelectedVertex,
             EditMode.Thing => (object?)_view.SelectedThing,
-            EditMode.Light => null,
+            EditMode.Light => _view.Selection.PrimaryLight,
             _ => null,
         };
         _inspector.SetTarget(target);

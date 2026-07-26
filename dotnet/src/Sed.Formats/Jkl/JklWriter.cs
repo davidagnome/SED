@@ -21,14 +21,16 @@ public static class JklWriter
         var (geo, sectors) = GeoResourceWriter.Build(level);
 
         var ranges = new List<(int start, int end, List<string> replacement)>();
-        AddSection(ranges, src, "HEADER", GenerateHeader(level));
-        AddSection(ranges, src, "GEORESOURCE", geo);
-        AddSection(ranges, src, "SECTORS", sectors);
-        AddSection(ranges, src, "TEMPLATES", GenerateTemplates(level));
-        AddSection(ranges, src, "THINGS", GenerateThings(level));
-        AddSection(ranges, src, "LIGHTS", GenerateLights(level));
-        AddSection(ranges, src, "COGS", GenerateCogs(level));
-        AddSection(ranges, src, "LAYERS", GenerateLayers(level));
+        var appended = new List<List<string>>();
+
+        AddSection(ranges, appended, src, "HEADER", GenerateHeader(level), true);
+        AddSection(ranges, appended, src, "GEORESOURCE", geo, true);
+        AddSection(ranges, appended, src, "SECTORS", sectors, true);
+        AddSection(ranges, appended, src, "TEMPLATES", GenerateTemplates(level), level.Templates.Count > 0);
+        AddSection(ranges, appended, src, "THINGS", GenerateThings(level), level.Things.Count > 0);
+        AddSection(ranges, appended, src, "LIGHTS", GenerateLights(level), level.Lights.Count > 0);
+        AddSection(ranges, appended, src, "COGS", GenerateCogs(level), level.Cogs.Count > 0);
+        AddSection(ranges, appended, src, "LAYERS", GenerateLayers(level), level.Layers.Count > 0);
         ranges.Sort((a, b) => a.start.CompareTo(b.start));
 
         var result = new List<string>(src.Length + 64);
@@ -45,13 +47,32 @@ public static class JklWriter
             result.Add(src[i]);
             i++;
         }
+
+        // Sections the source never had. LIGHTS and LAYERS are editor-authored and
+        // absent from every retail level, so without this a light placed in the
+        // editor would vanish on save.
+        foreach (var section in appended)
+        {
+            result.Add(string.Empty);
+            result.AddRange(section);
+        }
+
         return string.Join('\n', result);
     }
 
-    private static void AddSection(List<(int, int, List<string>)> ranges, string[] lines, string name, List<string> replacement)
+    /// <summary>
+    /// Registers a section for rewriting. When the source already has the section
+    /// its lines are replaced in place; when it does not and
+    /// <paramref name="hasContent"/> is true, the generated section is appended at
+    /// the end of the file instead of being dropped. Sections with no content are
+    /// skipped entirely so untouched levels do not sprout empty ones.
+    /// </summary>
+    private static void AddSection(List<(int, int, List<string>)> ranges, List<List<string>> appended,
+        string[] lines, string name, List<string> replacement, bool hasContent)
     {
         var (start, end) = FindSection(lines, name);
         if (start >= 0) ranges.Add((start, end, replacement));
+        else if (hasContent) appended.Add(replacement);
     }
 
     /// <summary>

@@ -18,6 +18,7 @@ public sealed class SelectionSet
     private readonly Bucket<Thing> _things = new();
     private readonly Bucket<Surface> _surfaces = new();
     private readonly Bucket<Sector> _sectors = new();
+    private readonly Bucket<Light> _lights = new();
 
     private int _deferDepth;
     private bool _dirty;
@@ -29,14 +30,16 @@ public sealed class SelectionSet
     public IReadOnlyList<Thing> Things => _things.Items;
     public IReadOnlyList<Surface> Surfaces => _surfaces.Items;
     public IReadOnlyList<Sector> Sectors => _sectors.Items;
+    public IReadOnlyList<Light> Lights => _lights.Items;
 
     /// <summary>Most recently added item of each kind — the inspector's target.</summary>
     public Vertex? PrimaryVertex => _vertices.Primary;
     public Thing? PrimaryThing => _things.Primary;
     public Surface? PrimarySurface => _surfaces.Primary;
     public Sector? PrimarySector => _sectors.Primary;
+    public Light? PrimaryLight => _lights.Primary;
 
-    public int Count => _vertices.Count + _things.Count + _surfaces.Count + _sectors.Count;
+    public int Count => _vertices.Count + _things.Count + _surfaces.Count + _sectors.Count + _lights.Count;
     public bool IsEmpty => Count == 0;
 
     /// <summary>True when more than one item is selected, across all kinds.</summary>
@@ -48,22 +51,26 @@ public sealed class SelectionSet
     public bool Add(Thing t) => Mutate(_things.Add(t));
     public bool Add(Surface s) => Mutate(_surfaces.Add(s));
     public bool Add(Sector s) => Mutate(_sectors.Add(s));
+    public bool Add(Light l) => Mutate(_lights.Add(l));
 
     public bool Remove(Vertex v) => Mutate(_vertices.Remove(v));
     public bool Remove(Thing t) => Mutate(_things.Remove(t));
     public bool Remove(Surface s) => Mutate(_surfaces.Remove(s));
     public bool Remove(Sector s) => Mutate(_sectors.Remove(s));
+    public bool Remove(Light l) => Mutate(_lights.Remove(l));
 
     public bool Contains(Vertex v) => _vertices.Contains(v);
     public bool Contains(Thing t) => _things.Contains(t);
     public bool Contains(Surface s) => _surfaces.Contains(s);
     public bool Contains(Sector s) => _sectors.Contains(s);
+    public bool Contains(Light l) => _lights.Contains(l);
 
     /// <summary>Adds the item if absent, removes it if present (Ctrl+click).</summary>
     public void Toggle(Vertex v) { if (!Remove(v)) Add(v); }
     public void Toggle(Thing t) { if (!Remove(t)) Add(t); }
     public void Toggle(Surface s) { if (!Remove(s)) Add(s); }
     public void Toggle(Sector s) { if (!Remove(s)) Add(s); }
+    public void Toggle(Light l) { if (!Remove(l)) Add(l); }
 
     /// <summary>Empties every bucket.</summary>
     public void Clear()
@@ -73,6 +80,7 @@ public sealed class SelectionSet
         _things.Clear();
         _surfaces.Clear();
         _sectors.Clear();
+        _lights.Clear();
         Mutate(any);
     }
 
@@ -81,6 +89,7 @@ public sealed class SelectionSet
     public void SelectOnly(Thing? t) { using var _ = Defer(); Clear(); if (t is not null) Add(t); }
     public void SelectOnly(Surface? s) { using var _ = Defer(); Clear(); if (s is not null) Add(s); }
     public void SelectOnly(Sector? s) { using var _ = Defer(); Clear(); if (s is not null) Add(s); }
+    public void SelectOnly(Light? l) { using var _ = Defer(); Clear(); if (l is not null) Add(l); }
 
     /// <summary>
     /// Every vertex the selection implies: the directly selected ones, plus the
@@ -112,7 +121,10 @@ public sealed class SelectionSet
         using var _ = Defer();
         var liveSectors = new HashSet<Sector>(level.Sectors);
         var liveThings = new HashSet<Thing>(level.Things);
+        var liveLights = new HashSet<Light>(level.Lights);
 
+        foreach (var l in _lights.Items.ToArray())
+            if (!liveLights.Contains(l)) Remove(l);
         foreach (var t in _things.Items.ToArray())
             if (!liveThings.Contains(t)) Remove(t);
         foreach (var s in _sectors.Items.ToArray())

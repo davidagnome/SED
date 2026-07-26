@@ -108,6 +108,30 @@ public class SurfaceNormalTests
     }
 
     [Fact]
+    public void BoxSectorFaces_AllPointInward()
+    {
+        // The engine's convention: sector surface normals face into the sector.
+        // Verified against retail data — 20,250 surfaces across four levels are
+        // inward with no mixed sector — so new geometry must match, or the
+        // lighting pass, extrude direction and auto-texture axis all misbehave.
+        var level = new Level();
+        var box = SectorFactory.CreateBox(level, new Vec3(3, -2, 5), 1.5, "dflt.mat", 0);
+
+        var centre = Vec3.Zero;
+        foreach (var v in box.Vertices) centre += v.Position;
+        centre *= 1.0 / box.Vertices.Count;
+
+        Assert.Equal(6, box.Surfaces.Count);
+        foreach (var surf in box.Surfaces)
+        {
+            surf.RecalcNormal();
+            double towardCentre = surf.Normal.Dot(centre - surf.Corners[0].Vertex.Position);
+            Assert.True(towardCentre > 0,
+                $"surface {surf.Num} faces outward (dot {towardCentre:0.###})");
+        }
+    }
+
+    [Fact]
     public void NonAxisAlignedPolygon_GetsCorrectNormal()
     {
         // Triangle on the plane x + y + z = 1 ⇒ normal ∝ (1,1,1).

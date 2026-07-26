@@ -19,6 +19,7 @@
     <Project Path="tools/Sed.LevelRender/Sed.LevelRender.csproj" />
     <Project Path="tools/Sed.MatTool/Sed.MatTool.csproj" />
     <Project Path="tools/Sed.OpsProbe/Sed.OpsProbe.csproj" />
+    <Project Path="tools/Sed.UiProbe/Sed.UiProbe.csproj" />
     <Project Path="tools/Sed.SaveProbe/Sed.SaveProbe.csproj" />
     <Project Path="tools/Sed.SceneProbe/Sed.SceneProbe.csproj" />
     <Project Path="tools/Sed.ThreeDoProbe/Sed.ThreeDoProbe.csproj" />

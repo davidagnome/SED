@@ -46,9 +46,12 @@ and confirm each name is referenced somewhere under `src/Sed.App/`.
 - Use `JklReader.Next()`, `Tokens()`, `StripIndex()`, `ParseFloat/Int/Hex`.
 
 ### JKL section write pattern
-- Add `AddSection(ranges, src, "SECTION", GenerateXxx(level))` in
-  `JklWriter.Build` (`src/Sed.Formats/Jkl/JklWriter.cs:24`).
+- Add `AddSection(ranges, appended, src, "SECTION", GenerateXxx(level), hasContent)`
+  in `JklWriter.Build` (`src/Sed.Formats/Jkl/JklWriter.cs`).
 - Write a `GenerateXxx` that returns `List<string>` of section lines.
+- `hasContent` decides what happens when the source lacks the section: true
+  appends it at the end of the file, false skips it. Pass `level.Xxx.Count > 0`
+  for editor-authored sections so untouched levels don't gain empty ones.
 
 ### Test pattern
 - `[Fact]` in `tests/Sed.Core.Tests/`.
@@ -94,14 +97,14 @@ headlessly so UI changes can be eyeballed without opening a window.
 
 ```
 WAVE 0 (fully parallel — no inter-dependencies):
-  S1 SelectionSet    L1 LightCalculator    U1 HeaderEditor
-  U2 LayerPanel      U3 TemplateEditor     F1 SaveJklGob
-  G1 Bridge          T1 TexFlags
+  S1 SelectionSet ✅ DONE     L1 LightCalculator ✅ DONE
+  U1 HeaderEditor             U2 LayerPanel
+  U3 TemplateEditor           F1 SaveJklGob
+  G1 Bridge                   T1 TexFlags
 
 WAVE 1:
-  S2 BoxSelect (needs S1)      S3 CopyPaste (needs S1)
-  Q1 FindDialogs (needs S1 for multi-result selection)
-  U4 CogEditor (needs U3)
+  S2 BoxSelect ✅ DONE    S3 CopyPaste ✅ DONE    L2 LightEntities ✅ DONE
+  Q1 FindDialogs          U4 CogEditor (needs U3)
 
 WAVE 2:
   F2 SaveAndTest (needs F1)    I1 DfImport      I2 ThreeDoExport
@@ -115,51 +118,49 @@ WAVE 3:
 
 ## TRACK S — Selection model (the biggest practical gap)
 
-### S1 — SelectionSet
-- **Deps**: none
-- **Delphi ref**: `U_MULTISEL.PAS`
-- **New file**: `src/Sed.Core/Editing/SelectionSet.cs`.
-- Holds sets of vertices / things / surfaces / sectors with add / remove / toggle /
-  clear and a `Changed` event. One instance shared by `MainWindow`, `VulkanView`
-  and `MapView` (as `EditHistory` already is).
-- Replace the single `_selectedThing` / `_selectedSurface` / `_selectedVertex`
-  fields in `VulkanView` with reads off the set, keeping a "primary" for the
-  inspector.
-- Ctrl+click adds to the selection; plain click replaces it.
-- **Test**: set algebra + that `TransformVerticesCommand` accepts the set.
+### S1 — SelectionSet ✅ DONE
+`src/Sed.Core/Editing/SelectionSet.cs` + `CompositeCommand.cs`. Owned by
+`VulkanView`, handed to `MapView`. Ctrl/Cmd+click toggles, plain click replaces,
+Esc clears, Ctrl+A selects the active sector's surfaces. Move/rotate/scale/
+delete/set-material act on the whole selection as one undo step.
+Covered by `SelectionSetTests` + `MultiEditTests`, and by `Sed.OpsProbe` on
+retail levels.
 
-### S2 — Box-select
-- **Deps**: S1
-- Rubber-band rectangle in `MapView` (drag on empty space); populate the
-  `SelectionSet` with everything inside, respecting the active `EditMode`.
-- Also render a selection highlight for **all** selected items, not just the
-  primary — `SceneBuilder.BuildEdgeHighlight` currently draws one surface.
+### S2 — Box-select ✅ DONE
+`MapView` rubber-bands on a plain drag over empty space; Ctrl+drag extends;
+panning moved to middle-drag / Shift+drag / Alt+drag. Surfaces and sectors need
+full containment; vertices and things just need their point inside.
+Covered by `tools/Sed.UiProbe` (simulated pointer input).
 
-### S3 — Copy / paste
-- **Deps**: S1
-- **Delphi ref**: `U_COPYPASTE.PAS`
-- Serialize the selected fragment (sectors + their surfaces/vertices, things,
-  lights) into an in-memory clipboard; paste-in-place with an offset; undoable
-  via a single composite `IEditCommand`.
-- Remember that JK shares world vertices across sectors — paste must create new
-  vertices, not alias the originals.
+### S3 — Copy / paste ✅ DONE
+`LevelFragment` + `PasteFragmentCommand` (`src/Sed.Core/Editing/LevelClipboard.cs`),
+bound to Ctrl+C / Ctrl+V / Ctrl+D. Deep-clones vertices (never aliases), remaps
+in-fragment adjoins and clears outward-pointing ones. Covered by `ClipboardTests`
+and by `Sed.OpsProbe`, which also confirms a pasted room survives the JKL
+round-trip. Lights are copied too (L2).
 
 ---
 
 ## TRACK L — Lighting
 
-### L1 — Lighting calculation
-- **Deps**: none (LIGHTS already parses + writes)
-- **Delphi ref**: `LEV_UTILS.PAS`, `Calculate &Lighting`
-- **New file**: `src/Sed.Core/Lighting/LightCalculator.cs`.
-- Point light → per-vertex intensity with quadratic falloff, respecting sector
-  ambient and extra light; optional shadow ray-cast against surfaces.
-- Writes into `Surface.Corner.Intensity`, so it persists through the existing
-  GEORESOURCE regeneration with no writer changes.
-- Wire to **Tools ▸ Calculate Lighting**; must be a single undoable command over
-  the whole level.
-- **Test**: a light at a known distance produces the expected falloff; undo
-  restores every original intensity.
+### L1 — Lighting calculation ✅ DONE
+`src/Sed.Core/Lighting/LightCalculator.cs` + `CalculateLightingCommand`, on
+**Tools ▸ Calculate Lighting** (F9 / Shift+F9 for no shadows). Ports the engine
+falloff, shadow tracing (portals pass light unless `SAF_BlockLight`) and the
+sector-ambient pass; one undo step; accelerated by a uniform spatial grid
+(full bake of the largest retail level ≈ 0.5 s). Covered by `LightCalculatorTests`
+and `Sed.OpsProbe`.
+
+### L2 — Light entities as selectable objects ✅ DONE
+`SelectionSet` has a `Light` bucket; `Picker.PickLight` + `MapView` diamonds make
+lights pickable and box-selectable in Light mode; `CreateLightCommand` /
+`DeleteLightCommand` / `MoveLightCommand`; `LevelFragment` copies lights; the
+Light inspector is wired to the primary selection. Covered by `LightEntityTests`
+and by both probes.
+
+Fixing this exposed a writer bug — `JklWriter` dropped any section the source
+lacked, so lights added to a retail level were lost on save. Missing sections
+with content are now appended (`SectionRoundTripTests`).
 
 ---
 
@@ -236,9 +237,10 @@ UI plus the field commands.
 
 ## Known weak spots worth fixing opportunistically
 
-- **No test coverage for `Sed.App` or `Sed.Rendering.Vulkan`.** Vulkan is
-  genuinely hard to unit-test, but `MapView`'s hit-testing and screen↔world
-  projection are pure math and should be extracted into `Sed.Core` and tested.
+- **Thin test coverage for `Sed.App`, none for `Sed.Rendering.Vulkan`.**
+  `tools/Sed.UiProbe` now drives `MapView`'s pointer path headlessly — extend it
+  rather than adding new untested interaction code. `MapView`'s hit-testing and
+  screen↔world projection are still pure math that would be better in `Sed.Core`.
 - **`GobWriter` has a single test.** Thin for a format writer — add odd-size,
   many-entry and long-name cases.
 - **Only the active sector's vertices are drawn** in the 2D map view.

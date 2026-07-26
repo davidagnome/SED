@@ -197,6 +197,150 @@ Console.WriteLine();
     level.RenumberSectors();
 }
 
+// ---- Copy / paste (clipboard) on real data ----
+Console.WriteLine();
+{
+    var sel = new SelectionSet();
+    var source = level.Sectors[0];
+    sel.Add(source);
+
+    var fragment = LevelFragment.Capture(sel, level);
+    int sectorsBefore = level.Sectors.Count;
+
+    var paste = new PasteFragmentCommand(level, fragment, new Sed.Core.Math.Vec3(100, 0, 0));
+    history.Do(paste);
+
+    var copy = paste.PastedSectors[0];
+    Check("paste adds a sector", level.Sectors.Count == sectorsBefore + 1);
+    Check("pasted geometry matches the source",
+        copy.Vertices.Count == source.Vertices.Count && copy.Surfaces.Count == source.Surfaces.Count,
+        $"{copy.Vertices.Count} verts, {copy.Surfaces.Count} surfaces");
+
+    // No vertex may be shared with the original — JK pools world vertices, so
+    // aliasing here would make edits to the copy corrupt the source room.
+    var sourceVerts = new HashSet<Vertex>(source.Vertices);
+    Check("pasted vertices are clones, not aliases", copy.Vertices.All(v => !sourceVerts.Contains(v)));
+
+    // Adjoins that pointed outside the fragment must be cleared, or the pasted
+    // room would open into the original through a portal 100 units away.
+    int leaked = copy.Surfaces.Count(s => s.Adjoin is not null && !copy.Surfaces.Contains(s.Adjoin));
+    Check("no adjoin leaks from the copy back to the original", leaked == 0, $"{leaked} leaked");
+
+    history.Undo();
+    Check("paste undoes cleanly", level.Sectors.Count == sectorsBefore);
+    history.Redo();
+    Check("paste redoes", level.Sectors.Count == sectorsBefore + 1);
+
+    // A duplicated room is worthless if it does not persist — save again with the
+    // paste in place and confirm the extra geometry comes back.
+    var pastePath = Path.Combine(Path.GetTempPath(), $"opsprobe_paste_{args[1]}.jkl");
+    JklWriter.Save(doc, pastePath);
+    var afterPaste = JklParser.Parse(File.ReadAllText(pastePath));
+
+    Check("pasted sector survives the JKL round-trip",
+        afterPaste.Sectors.Count == level.Sectors.Count &&
+        afterPaste.Sectors.Sum(s => s.Surfaces.Count) == level.Sectors.Sum(s => s.Surfaces.Count),
+        $"{afterPaste.Sectors.Count} sectors, {afterPaste.Sectors.Sum(s => s.Surfaces.Count)} surfaces");
+}
+
+// ---- Lighting bake on real geometry ----
+// Retail levels ship without an "Editor lights" section, so synthesise one light
+// per sector centroid to exercise the calculator against real geometry.
+Console.WriteLine();
+{
+    int lightCount = System.Math.Min(40, level.Sectors.Count);
+    for (int i = 0; i < lightCount; i++)
+    {
+        var sector = level.Sectors[i];
+        if (sector.Vertices.Count == 0) continue;
+        var centre = TransformVerticesCommand.Centroid(sector.Vertices);
+        var extent = sector.Vertices.Max(v => (v.Position - centre).Length);
+        level.Lights.Add(new Light
+        {
+            Position = centre,
+            Range = System.Math.Max(0.5, extent * 2),
+            Intensity = 1.0,
+            Color = Sed.Core.Math.ColorF.White,
+        });
+    }
+
+    var scope = level.Sectors.Take(System.Math.Min(60, level.Sectors.Count)).ToList();
+
+    var noShadow = System.Diagnostics.Stopwatch.StartNew();
+    var quick = Sed.Core.Lighting.LightCalculator.Calculate(level, scope,
+        new Sed.Core.Lighting.LightingOptions { CastShadows = false });
+    noShadow.Stop();
+
+    var shadowed = System.Diagnostics.Stopwatch.StartNew();
+    var full = Sed.Core.Lighting.LightCalculator.Calculate(level, scope,
+        new Sed.Core.Lighting.LightingOptions { CastShadows = true });
+    shadowed.Stop();
+
+    Console.WriteLine($"lighting: {scope.Count} sectors, {full.Vertices} vertices, {level.Lights.Count} lights");
+    Console.WriteLine($"    no shadows: {noShadow.ElapsedMilliseconds,6} ms");
+    Console.WriteLine($"    shadowed:   {shadowed.ElapsedMilliseconds,6} ms  ({full.Shadowed} rays blocked)");
+
+    // The number that matters in practice: baking the entire level.
+    var whole = System.Diagnostics.Stopwatch.StartNew();
+    var fullLevel = Sed.Core.Lighting.LightCalculator.Calculate(level, null,
+        new Sed.Core.Lighting.LightingOptions { CastShadows = true });
+    whole.Stop();
+    Console.WriteLine($"    full level: {whole.ElapsedMilliseconds,6} ms  " +
+                      $"({fullLevel.Sectors} sectors, {fullLevel.Vertices} vertices)");
+
+    bool anyLit = scope.Any(s => s.Surfaces.Any(f => f.Corners.Any(c => c.Intensity.R > 0)));
+    Check("bake produces non-zero vertex lighting", anyLit);
+    Check("shadow pass blocks at least some rays", full.Shadowed > 0, $"{full.Shadowed} blocked");
+    Check("sector ambients were updated", scope.Any(s => s.Ambient.R > 0));
+
+    // Undo must restore every intensity exactly.
+    var probeScope = scope.Take(5).ToList();
+    var snapshot = probeScope.SelectMany(s => s.Surfaces).SelectMany(f => f.Corners)
+        .Select(c => c.Intensity).ToList();
+    var ambientSnapshot = probeScope.Select(s => s.Ambient).ToList();
+
+    var cmd = new CalculateLightingCommand(level, probeScope);
+    history.Do(cmd);
+    history.Undo();
+
+    var restored = probeScope.SelectMany(s => s.Surfaces).SelectMany(f => f.Corners)
+        .Select(c => c.Intensity).ToList();
+    Check("undo restores every vertex intensity exactly", restored.SequenceEqual(snapshot));
+    Check("undo restores sector ambients", probeScope.Select(s => s.Ambient).SequenceEqual(ambientSnapshot));
+
+    // Lights as editable entities: create, copy/paste, delete, and persistence.
+    int lightsBefore = level.Lights.Count;
+    var newLight = new Light
+    {
+        Position = level.Lights[0].Position + new Sed.Core.Math.Vec3(0.25, 0, 0),
+        Range = 3, Intensity = 0.75, Color = new Sed.Core.Math.ColorF(1, 0.5f, 0.25f),
+    };
+    history.Do(new CreateLightCommand(level, newLight));
+    Check("create light adds and numbers it", level.Lights.Count == lightsBefore + 1 && newLight.Num == lightsBefore);
+
+    var lightSel = new SelectionSet();
+    lightSel.Add(newLight);
+    var lightFragment = LevelFragment.Capture(lightSel, level);
+    var lightPaste = new PasteFragmentCommand(level, lightFragment, new Sed.Core.Math.Vec3(0, 0.25, 0));
+    history.Do(lightPaste);
+    Check("lights copy/paste as independent clones",
+        lightPaste.PastedLights.Count == 1 && !ReferenceEquals(lightPaste.PastedLights[0], newLight));
+
+    // Persist: the level had no LIGHTS section, so writing must create one.
+    var litPath = Path.Combine(Path.GetTempPath(), $"opsprobe_lights_{args[1]}.jkl");
+    JklWriter.Save(doc, litPath);
+    var litBack = JklParser.Parse(File.ReadAllText(litPath));
+    Check("lights survive the JKL round-trip",
+        litBack.Lights.Count == level.Lights.Count,
+        $"{level.Lights.Count} written, {litBack.Lights.Count} read back");
+
+    history.Undo();   // paste
+    history.Undo();   // create
+    Check("light create/paste undo cleanly", level.Lights.Count == lightsBefore);
+
+    level.Lights.Clear();
+}
+
 // ---- Consistency checker (Tools ▸ Check Consistency) on real data ----
 Console.WriteLine();
 var issues = Sed.Core.Validation.ConsistencyChecker.Check(reloaded);
@@ -211,3 +355,4 @@ Console.WriteLine(failures.Count == 0
     ? $"All checks passed. Wrote {outPath}"
     : $"{failures.Count} check(s) FAILED: {string.Join(", ", failures)}");
 return failures.Count == 0 ? 0 : 2;
+

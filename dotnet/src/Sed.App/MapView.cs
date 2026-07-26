@@ -55,6 +55,7 @@ public sealed class MapView : Control
     private Vec3 _dragStartPos;
     private Vertex? _dragVertex;
     private Thing? _dragThing;
+    private Light? _dragLight;
     private bool _dragged;
 
     private static readonly IBrush SelectBrush = new SolidColorBrush(Color.FromRgb(0xff, 0xe0, 0x33));
@@ -68,6 +69,12 @@ public sealed class MapView : Control
     private static readonly IPen SelectedEdgePen = new Pen(new SolidColorBrush(Color.FromRgb(0xff, 0xe0, 0x33)), 2);
     private static readonly IBrush ThingBrush = new SolidColorBrush(Color.FromRgb(0x33, 0xd0, 0xff));
     private static readonly IBrush VertexBrush = new SolidColorBrush(Color.FromRgb(0xff, 0x80, 0x30));
+    private static readonly IBrush LightBrush = new SolidColorBrush(Color.FromRgb(0xff, 0xf0, 0x99));
+    private static readonly IBrush BoxFillBrush = new SolidColorBrush(Color.FromArgb(0x30, 0xff, 0xe0, 0x33));
+    private static readonly IPen BoxPen = new Pen(new SolidColorBrush(Color.FromRgb(0xff, 0xe0, 0x33)), 1,
+        new DashStyle(new double[] { 3, 3 }, 0));
+
+    private bool _boxExtend;
 
     public MapView()
     {
@@ -104,6 +111,13 @@ public sealed class MapView : Control
         Bounds.Height / 2 - (v - _centerV) * _zoom);
 
     private Point ToScreen(Vec3 p) { var (u, v) = Project(p); return ToScreen(u, v); }
+
+    /// <summary>
+    /// Projects a world position to a control-relative screen point using the
+    /// current axis, pan and zoom. Public so overlays and interaction probes can
+    /// reason about where geometry lands on screen.
+    /// </summary>
+    public Point WorldToScreen(Vec3 world) => ToScreen(world);
 
     private (double u, double v) Unproject(Point screen) => (
         (screen.X - Bounds.Width / 2) / _zoom + _centerU,
@@ -219,9 +233,34 @@ public sealed class MapView : Control
             context.FillRectangle(brush, new Rect(c.X - 3, c.Y - 3, 6, 6));
         }
 
+        // Lights — drawn as diamonds so they read differently from things, and
+        // only in Light mode, since a level can carry hundreds.
+        if (Mode == EditMode.Light)
+            foreach (var light in _level.Lights)
+            {
+                var c = ToScreen(light.Position);
+                var brush = Selection?.Contains(light) == true ? SelectBrush : LightBrush;
+                var diamond = new StreamGeometry();
+                using (var g = diamond.Open())
+                {
+                    g.BeginFigure(new Point(c.X, c.Y - 4), true);
+                    g.LineTo(new Point(c.X + 4, c.Y));
+                    g.LineTo(new Point(c.X, c.Y + 4));
+                    g.LineTo(new Point(c.X - 4, c.Y));
+                    g.EndFigure(true);
+                }
+                context.DrawGeometry(brush, null, diamond);
+            }
+
+        DrawBoxSelect(context);
+
         // Coords readout
+        int selected = Selection?.Count ?? 0;
         var label = new FormattedText(
-            $"{_axis} ({(_axis == MapAxis.Top ? "XY" : _axis == MapAxis.Front ? "XZ" : "YZ")})  zoom={_zoom:0.#}  snap={(_snap ? "on" : "off")}",
+            $"{_axis} ({(_axis == MapAxis.Top ? "XY" : _axis == MapAxis.Front ? "XZ" : "YZ")})  zoom={_zoom:0.#}  " +
+            $"snap={(_snap ? "on" : "off")}  " +
+            (selected > 0 ? $"selected={selected}  " : "") +
+            "drag=box-select · shift/middle-drag=pan",
             System.Globalization.CultureInfo.CurrentCulture, FlowDirection.LeftToRight, Typeface.Default, 11, Brushes.Gray);
         context.DrawText(label, new Point(6, 4));
     }
@@ -273,6 +312,19 @@ public sealed class MapView : Control
         {
             double d = ScreenDist(ToScreen(thing.Position), screen);
             if (d < best) { best = d; found = thing; }
+        }
+        return found;
+    }
+
+    private Light? HitTestLight(Point screen)
+    {
+        if (_level is null) return null;
+        double best = 8;
+        Light? found = null;
+        foreach (var light in _level.Lights)
+        {
+            double d = ScreenDist(ToScreen(light.Position), screen);
+            if (d < best) { best = d; found = light; }
         }
         return found;
     }
@@ -330,11 +382,15 @@ public sealed class MapView : Control
         _dragged = false;
         e.Pointer.Capture(this);
 
-        // Ctrl/Cmd extends the selection; Shift and friends still pan.
+        // Ctrl/Cmd extends the selection. Panning is middle-drag, Shift+drag or
+        // Alt+drag — a plain drag on empty space rubber-band selects instead
+        // (as the original editor's 2D panes do).
         bool extend = e.KeyModifiers.HasFlag(KeyModifiers.Control) || e.KeyModifiers.HasFlag(KeyModifiers.Meta);
-        bool plain = e.KeyModifiers == KeyModifiers.None;
+        bool pan = e.GetCurrentPoint(this).Properties.IsMiddleButtonPressed
+                   || e.KeyModifiers.HasFlag(KeyModifiers.Shift)
+                   || e.KeyModifiers.HasFlag(KeyModifiers.Alt);
 
-        if (!plain && !extend)
+        if (pan)
         {
             _dragMode = DragMode.Pan;
             _lastDrag = _pressPoint;
@@ -352,6 +408,18 @@ public sealed class MapView : Control
                 break;
             case EditMode.Thing:
                 thing = HitTestThing(_pressPoint);
+                break;
+            case EditMode.Light:
+                if (HitTestLight(_pressPoint) is { } hitLight)
+                {
+                    SelectLight(hitLight, extend);
+                    _dragMode = DragMode.Object;
+                    _dragLight = hitLight;
+                    _dragVertex = null;
+                    _dragThing = null;
+                    _dragStartPos = hitLight.Position;
+                    return;
+                }
                 break;
             case EditMode.Sector:
             case EditMode.Surface:
@@ -382,11 +450,19 @@ public sealed class MapView : Control
             return;
         }
 
-        if (surf is not null) SelectSurface(surf, extend);
-        else if (!extend) ClearSelection();
+        if (surf is not null)
+        {
+            SelectSurface(surf, extend);
+            _dragMode = DragMode.Pan;
+            _lastDrag = _pressPoint;
+            return;
+        }
 
-        _dragMode = DragMode.Pan;
-        _lastDrag = _pressPoint;
+        // Empty space: begin a rubber-band selection. A plain press also clears,
+        // so a click on nothing deselects even if the drag never starts.
+        if (!extend) ClearSelection();
+        _boxExtend = extend;
+        _dragMode = DragMode.Box;
     }
 
     protected override void OnPointerMoved(PointerEventArgs e)
@@ -404,10 +480,13 @@ public sealed class MapView : Control
             return;
         }
 
-        if (_dragMode == DragMode.Object && System.Math.Abs(pos.X - _pressPoint.X) + System.Math.Abs(pos.Y - _pressPoint.Y) > 3)
+        if (System.Math.Abs(pos.X - _pressPoint.X) + System.Math.Abs(pos.Y - _pressPoint.Y) > 3)
         {
-            _dragged = true;
-            InvalidateVisual();
+            if (_dragMode is DragMode.Object or DragMode.Box)
+            {
+                _dragged = true;
+                InvalidateVisual();
+            }
         }
     }
 
@@ -435,6 +514,10 @@ public sealed class MapView : Control
             var delta = DeltaToWorld(du, dv);
             if (delta.LengthSquared > 1e-12)
                 MoveDraggedSelection(delta);
+        }
+        else if (_dragMode == DragMode.Box && _dragged)
+        {
+            SelectInBox(new Rect(_pressPoint, pos), _boxExtend);
         }
 
         _dragMode = DragMode.None;
@@ -469,6 +552,80 @@ public sealed class MapView : Control
         }
     }
 
+    // ---- box selection ----
+
+    /// <summary>
+    /// Adds everything inside the screen rectangle to the selection, choosing what
+    /// counts by the active <see cref="Mode"/>. Points (vertices, things) must lie
+    /// inside; surfaces and sectors must be *fully* contained, so a band drawn
+    /// across a level does not sweep in half-visible geometry.
+    /// </summary>
+    private void SelectInBox(Rect box, bool extend)
+    {
+        if (_level is null || Selection is null) return;
+
+        using (Selection.Defer())
+        {
+            if (!extend) Selection.Clear();
+
+            switch (Mode)
+            {
+                case EditMode.Vertex:
+                    foreach (var sector in _level.Sectors)
+                        foreach (var v in sector.Vertices)
+                            if (box.Contains(ToScreen(v.Position)))
+                            {
+                                ActiveSector = sector;
+                                Selection.Add(v);
+                            }
+                    break;
+
+                case EditMode.Thing:
+                    foreach (var t in _level.Things)
+                        if (box.Contains(ToScreen(t.Position)))
+                            Selection.Add(t);
+                    break;
+
+                case EditMode.Light:
+                    foreach (var l in _level.Lights)
+                        if (box.Contains(ToScreen(l.Position)))
+                            Selection.Add(l);
+                    break;
+
+                case EditMode.Sector:
+                    foreach (var sector in _level.Sectors)
+                        if (sector.Vertices.Count > 0 && sector.Vertices.All(v => box.Contains(ToScreen(v.Position))))
+                            Selection.Add(sector);
+                    break;
+
+                default:
+                    foreach (var sector in _level.Sectors)
+                        foreach (var surf in sector.Surfaces)
+                            if (surf.Corners.Count > 0 &&
+                                surf.Corners.All(c => box.Contains(ToScreen(c.Vertex.Position))))
+                            {
+                                ActiveSector = sector;
+                                Selection.Add(surf);
+                            }
+                    break;
+            }
+        }
+
+        int n = Selection.Count;
+        SelectionChanged?.Invoke(n == 0
+            ? "Box select: nothing inside the box"
+            : $"Box select: {n} item(s) selected — arrows move all, Ctrl+click to adjust");
+        InvalidateVisual();
+    }
+
+    private void DrawBoxSelect(DrawingContext context)
+    {
+        if (_dragMode != DragMode.Box || !_dragged) return;
+        var rect = new Rect(_pressPoint, _currentPoint);
+        context.FillRectangle(BoxFillBrush, rect);
+        context.DrawRectangle(null, BoxPen, rect);
+    }
+
     // ---- selection ----
 
     /// <summary>
@@ -490,9 +647,12 @@ public sealed class MapView : Control
                     verts.Count == 1 ? "Move vertex" : $"Move {verts.Count} vertices"));
             foreach (var t in Selection.Things)
                 parts.Add(new MoveThingCommand(t, delta));
+            foreach (var l in Selection.Lights)
+                parts.Add(new MoveLightCommand(l, delta));
         }
         else if (_dragVertex is not null) parts.Add(new MoveVertexCommand(_dragVertex, delta));
         else if (_dragThing is not null) parts.Add(new MoveThingCommand(_dragThing, delta));
+        else if (_dragLight is not null) parts.Add(new MoveLightCommand(_dragLight, delta));
 
         if (parts.Count == 0) return;
         History.Do(parts.Count == 1 ? parts[0] : new CompositeCommand($"Move {parts.Count} items", parts));
@@ -510,6 +670,13 @@ public sealed class MapView : Control
     {
         if (Selection is null || t is null) { if (!extend) ClearSelection(); return; }
         if (extend) Selection.Toggle(t); else Selection.SelectOnly(t);
+        InvalidateVisual();
+    }
+
+    public void SelectLight(Light? l, bool extend = false)
+    {
+        if (Selection is null || l is null) { if (!extend) ClearSelection(); return; }
+        if (extend) Selection.Toggle(l); else Selection.SelectOnly(l);
         InvalidateVisual();
     }
 

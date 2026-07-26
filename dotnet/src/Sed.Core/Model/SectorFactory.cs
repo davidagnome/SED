@@ -5,10 +5,19 @@ namespace Sed.Core.Model;
 /// <summary>Builds default geometry for new sectors.</summary>
 public static class SectorFactory
 {
+    /// <summary>
+    /// Face windings for a box, all oriented so the surface normal points **into**
+    /// the sector. That is the engine's convention: every one of the 20,250 sector
+    /// surfaces across retail `07yun`, `01narshadda`, `03katarn` and `09fuelstation`
+    /// faces inward, with no mixed sector. Three of these faces used to be wound
+    /// the other way, which left new box rooms half-inverted — the lighting pass
+    /// skips surfaces the light is behind, extrude pushed the wrong way, and
+    /// auto-texture picked its projection axis from a flipped normal.
+    /// </summary>
     private static readonly int[][] BoxFaces =
     {
-        new[] { 0, 1, 2, 3 }, new[] { 4, 5, 6, 7 }, new[] { 0, 1, 5, 4 },
-        new[] { 3, 2, 6, 7 }, new[] { 0, 3, 7, 4 }, new[] { 1, 2, 6, 5 },
+        new[] { 0, 1, 2, 3 }, new[] { 7, 6, 5, 4 }, new[] { 4, 5, 1, 0 },
+        new[] { 3, 2, 6, 7 }, new[] { 0, 3, 7, 4 }, new[] { 5, 6, 2, 1 },
     };
 
     /// <summary>

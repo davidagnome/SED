@@ -6,6 +6,7 @@ using Avalonia.Media.Imaging;
 using Avalonia.Threading;
 using Sed.Core;
 using Sed.Core.Editing;
+using Sed.Core.Lighting;
 using Sed.Core.Math;
 using Sed.Core.Model;
 using Sed.Formats.ThreeDo;
@@ -144,6 +145,7 @@ public sealed class VulkanView : Control
     private static readonly ColorF MarkerColor = new(0.2f, 0.9f, 1f);    // cyan things
     private static readonly ColorF VertexColor = new(1f, 0.5f, 0.1f);    // orange vertices
     private static readonly ColorF SelectColor = new(1f, 0.9f, 0.2f);    // yellow selection
+    private static readonly ColorF LightColor = new(1f, 0.95f, 0.6f);    // warm white lights
 
     private void RefreshMarkers()
     {
@@ -151,6 +153,13 @@ public sealed class VulkanView : Control
         var markers = new Mesh();
         foreach (var thing in _markerThings)
             markers.Append(SceneBuilder.BuildMarker(thing.Position, _markerSize, MarkerColor));
+
+        // Lights only get markers in Light mode — a busy level has hundreds and
+        // they would bury the geometry otherwise.
+        if (_level is not null && Mode == EditMode.Light)
+            foreach (var light in _level.Lights)
+                markers.Append(SceneBuilder.BuildMarker(light.Position, _markerSize * 0.9, LightColor));
+
         if (_activeSector is not null && Mode == EditMode.Vertex)
             foreach (var v in _activeSector.Vertices)
                 markers.Append(SceneBuilder.BuildMarker(v.Position, _markerSize * 0.7, VertexColor));
@@ -270,6 +279,11 @@ public sealed class VulkanView : Control
             if (e.Key == Key.Z) { History.Undo(); e.Handled = true; return; }
             if (e.Key == Key.Y) { History.Redo(); e.Handled = true; return; }
 
+            // Clipboard
+            if (e.Key == Key.C) { CopySelection(); e.Handled = true; return; }
+            if (e.Key == Key.V) { PasteClipboard(); e.Handled = true; return; }
+            if (e.Key == Key.D) { DuplicateSelection(); e.Handled = true; return; }
+
             // Geometry ops
             if (e.Key == Key.E) { ExtrudeSelectedSurface(shift ? -1.0 : 1.0); e.Handled = true; return; }
             if (e.Key == Key.F) { FlipSelectedSurface(); e.Handled = true; return; }
@@ -309,7 +323,8 @@ public sealed class VulkanView : Control
 
         if (e.Key == Key.Insert)
         {
-            if (SelectedSurface is { } insertTarget) History.Do(new InsertSurfaceVertexCommand(insertTarget, 0));
+            if (Mode == EditMode.Light) CreateLight();
+            else if (SelectedSurface is { } insertTarget) History.Do(new InsertSurfaceVertexCommand(insertTarget, 0));
             else CreateThing();
             e.Handled = true;
             return;
@@ -378,6 +393,38 @@ public sealed class VulkanView : Control
         History.Do(new CreateThingCommand(_level, t));
     }
 
+    /// <summary>
+    /// Adds a light in front of the camera, cloning the selected light's settings
+    /// when there is one so a room can be lit consistently.
+    /// </summary>
+    public void CreateLight()
+    {
+        if (_level is null) return;
+
+        var position = _camPos + Cam().Forward * (_moveSpeed * 15);
+        var light = Selection.PrimaryLight is { } template
+            ? new Light
+            {
+                Position = position,
+                Range = template.Range,
+                Intensity = template.Intensity,
+                Color = template.Color,
+                Flags = template.Flags,
+                Layer = template.Layer,
+            }
+            : new Light
+            {
+                Position = position,
+                Range = System.Math.Max(1.0, _moveSpeed * 40),
+                Intensity = 1.0,
+                Color = ColorF.White,
+            };
+
+        Selection.SelectOnly(light);
+        History.Do(new CreateLightCommand(_level, light));
+        SelectionChanged?.Invoke($"Created light #{light.Num} — F9 to re-bake lighting, Ctrl+Z to undo");
+    }
+
     /// <summary>Creates a default box-room sector in front of the camera.</summary>
     public void CreateSector()
     {
@@ -417,6 +464,9 @@ public sealed class VulkanView : Control
 
         foreach (var t in Selection.Things)
             parts.Add(new MoveThingCommand(t, delta));
+
+        foreach (var l in Selection.Lights)
+            parts.Add(new MoveLightCommand(l, delta));
 
         if (parts.Count == 0) return;
         History.Do(parts.Count == 1 ? parts[0] : new CompositeCommand(DescribeSelection("Move"), parts));
@@ -486,6 +536,55 @@ public sealed class VulkanView : Control
         int next = (cur + 1) % Materials.Count;
         if (SetSelectedSurfaceMaterial(Materials[next], next))
             SelectionChanged?.Invoke($"Material → {Materials[next]} (M to cycle)");
+    }
+
+    /// <summary>
+    /// Bakes static lighting from the level's LIGHTS into per-vertex intensities.
+    /// Runs over the selected sectors when there is a selection, otherwise the
+    /// whole level. One undo step.
+    /// </summary>
+    public void CalculateLighting(bool castShadows = true)
+    {
+        if (_level is null) return;
+        if (_level.Lights.Count == 0)
+        {
+            SelectionChanged?.Invoke("Calculate Lighting: this level has no lights in its LIGHTS section.");
+            return;
+        }
+
+        // Scope to a selection when there is one — a full bake on a large level
+        // with shadows is slow, and lighting one room at a time is the common case.
+        var scope = SelectedSectors();
+        var options = new LightingOptions { CastShadows = castShadows };
+        var command = new CalculateLightingCommand(_level, scope, options);
+
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        History.Do(command);
+        clock.Stop();
+
+        var stats = command.Stats;
+        string where = scope is null ? "whole level" : $"{scope.Count} selected sector(s)";
+        SelectionChanged?.Invoke(stats is null
+            ? "Calculate Lighting: nothing to do."
+            : $"Lit {where}: {stats.Vertices} vertices from {stats.Lights} lights" +
+              $"{(castShadows ? $", {stats.Shadowed} shadowed" : ", no shadows")} " +
+              $"in {clock.ElapsedMilliseconds} ms — Ctrl+Z to undo");
+    }
+
+    /// <summary>Sectors implied by the selection, or null when nothing is selected.</summary>
+    private List<Sector>? SelectedSectors()
+    {
+        var seen = new HashSet<Sector>();
+        var result = new List<Sector>();
+
+        foreach (var s in Selection.Sectors)
+            if (seen.Add(s)) result.Add(s);
+        foreach (var s in Selection.Surfaces)
+            if (seen.Add(s.Sector)) result.Add(s.Sector);
+        foreach (var v in Selection.Vertices)
+            if (v.Sector is { } sec && seen.Add(sec)) result.Add(sec);
+
+        return result.Count > 0 ? result : null;
     }
 
     /// <summary>Brightens/darkens the selected vertex light, or the active sector's ambient.</summary>
@@ -590,6 +689,70 @@ public sealed class VulkanView : Control
     /// <summary>Empties the shared selection (Esc, or Edit ▸ Select None).</summary>
     public void ClearSelection() => Selection.Clear();
 
+    // ---- clipboard ----
+
+    private LevelFragment? _clipboard;
+
+    /// <summary>Snapshots the selection into the clipboard (sectors and things).</summary>
+    public void CopySelection()
+    {
+        if (_level is null) return;
+
+        var fragment = LevelFragment.Capture(Selection, _level);
+        if (fragment.IsEmpty)
+        {
+            SelectionChanged?.Invoke("Copy: select sectors, surfaces or things first.");
+            return;
+        }
+
+        _clipboard = fragment;
+        SelectionChanged?.Invoke(
+            $"Copied {fragment.Sectors.Count} sector(s), {fragment.Things.Count} thing(s), " +
+            $"{fragment.Lights.Count} light(s) — Ctrl+V to paste");
+    }
+
+    /// <summary>
+    /// Pastes the clipboard beside the original — offset by the fragment's own
+    /// width so a duplicated room lands next to its source rather than inside it —
+    /// then selects what was pasted so it can be dragged into place immediately.
+    /// </summary>
+    public void PasteClipboard()
+    {
+        if (_level is null) return;
+        if (_clipboard is not { } fragment || fragment.IsEmpty)
+        {
+            SelectionChanged?.Invoke("Paste: the clipboard is empty (Ctrl+C to copy a selection).");
+            return;
+        }
+
+        var bounds = fragment.Bounds;
+        double width = bounds.Max.X - bounds.Min.X;
+        var offset = new Vec3(width > 1e-6 ? width * 1.1 : System.Math.Max(0.5, _moveSpeed * 8), 0, 0);
+
+        var paste = new PasteFragmentCommand(_level, fragment, offset);
+        History.Do(paste);
+
+        using (Selection.Defer())
+        {
+            Selection.Clear();
+            foreach (var s in paste.PastedSectors) Selection.Add(s);
+            foreach (var t in paste.PastedThings) Selection.Add(t);
+            foreach (var l in paste.PastedLights) Selection.Add(l);
+        }
+        _activeSector = paste.PastedSectors.FirstOrDefault() ?? _activeSector;
+
+        SelectionChanged?.Invoke(
+            $"Pasted {paste.PastedSectors.Count} sector(s), {paste.PastedThings.Count} thing(s), " +
+            $"{paste.PastedLights.Count} light(s) — arrows to move, Ctrl+Z to undo");
+    }
+
+    /// <summary>Copy then paste in one step — duplicates the selection in place.</summary>
+    public void DuplicateSelection()
+    {
+        CopySelection();
+        if (_clipboard is { IsEmpty: false }) PasteClipboard();
+    }
+
     /// <summary>Selects every surface of the active sector — a quick way to grab a room.</summary>
     public void SelectActiveSectorSurfaces()
     {
@@ -662,6 +825,9 @@ public sealed class VulkanView : Control
 
         foreach (var t in Selection.Things)
             parts.Add(new DeleteThingCommand(_level, t));
+
+        foreach (var l in Selection.Lights)
+            parts.Add(new DeleteLightCommand(_level, l));
 
         if (parts.Count == 0) return;
 
@@ -796,6 +962,14 @@ public sealed class VulkanView : Control
                         else Selection.SelectOnly(hit.Vertex);
                         break;
                     }
+                case EditMode.Light:
+                    {
+                        var hit = Picker.PickLight(_level, ray, _markerSize * 1.8);
+                        if (hit is null) { if (!extend) Selection.Clear(); break; }
+                        if (extend) Selection.Toggle(hit.Light);
+                        else Selection.SelectOnly(hit.Light);
+                        break;
+                    }
                 case EditMode.Sector:
                 case EditMode.Surface:
                 default:
@@ -844,6 +1018,8 @@ public sealed class VulkanView : Control
             sel.Append(SceneBuilder.BuildMarker(v.Position, _markerSize * 1.1, SelectColor));
         foreach (var th in Selection.Things)
             sel.Append(SceneBuilder.BuildMarker(th.Position, _markerSize * 1.3, SelectColor));
+        foreach (var li in Selection.Lights)
+            sel.Append(SceneBuilder.BuildMarker(li.Position, _markerSize * 1.3, SelectColor));
         foreach (var s in Selection.Surfaces)
             sel.Append(SceneBuilder.BuildEdgeHighlight(s, t, SelectColor, VertexColor));
         foreach (var sec in Selection.Sectors)
@@ -864,6 +1040,7 @@ public sealed class VulkanView : Control
             if (Selection.Vertices.Count > 0) parts.Add($"{Selection.Vertices.Count} vertices");
             if (Selection.Things.Count > 0) parts.Add($"{Selection.Things.Count} things");
             if (Selection.Sectors.Count > 0) parts.Add($"{Selection.Sectors.Count} sectors");
+            if (Selection.Lights.Count > 0) parts.Add($"{Selection.Lights.Count} lights");
             return $"Selected {string.Join(", ", parts)} — arrows move all, [ ] rotate, , . scale, Ctrl+click to add/remove";
         }
 
@@ -874,6 +1051,9 @@ public sealed class VulkanView : Control
             var name = t.Name.Length > 0 ? t.Name : "?";
             return $"Thing #{t.Num} '{name}' @ {t.Position}  — arrows/PgUp-PgDn to move, Ctrl+click to add, Ctrl+Z undo";
         }
+        if (Selection.PrimaryLight is { } li)
+            return $"Light #{li.Num} @ {li.Position} — range {li.Range:0.##}, intensity {li.Intensity:0.##}" +
+                   "  (arrows move, Delete removes, Insert adds another)";
         if (SelectedSurface is { } s)
         {
             var mat = string.IsNullOrEmpty(s.Material) ? "(no material)" : s.Material;

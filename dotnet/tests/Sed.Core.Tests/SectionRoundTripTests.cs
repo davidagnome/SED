@@ -77,6 +77,45 @@ public class SectionRoundTripTests
         """;
 
     [Fact]
+    public void SectionAbsentFromSource_IsAppendedRatherThanDropped()
+    {
+        // Retail levels carry no LIGHTS or LAYERS section — those are authored by
+        // the editor. The patch writer used to rewrite only sections it could
+        // already find, so a light placed in such a level vanished on save.
+        var withoutLights = Jkl
+            .Replace("SECTION: LIGHTS", "SECTION: UNUSEDLIGHTS");
+
+        var doc = JklParser.ParseDocument(withoutLights);
+        Assert.Empty(doc.Level.Lights);
+
+        var light = doc.Level.NewLight();
+        light.Position = new Vec3(1, 2, 3);
+        light.Range = 7.5;
+        light.Intensity = 0.5;
+
+        var output = JklWriter.Build(doc);
+        Assert.Contains("SECTION: LIGHTS", output);
+
+        var reloaded = JklParser.Parse(output);
+        var back = Assert.Single(reloaded.Lights);
+        Assert.Equal(new Vec3(1, 2, 3), back.Position);
+        Assert.Equal(7.5, back.Range, 5);
+    }
+
+    [Fact]
+    public void EmptySectionsAreNotInventedOnUntouchedLevels()
+    {
+        // A level with no lights must not gain an empty LIGHTS section just
+        // because it was opened and saved.
+        var withoutLights = Jkl.Replace("SECTION: LIGHTS", "SECTION: UNUSEDLIGHTS");
+
+        var doc = JklParser.ParseDocument(withoutLights);
+        var output = JklWriter.Build(doc);
+
+        Assert.DoesNotContain("SECTION: LIGHTS", output);
+    }
+
+    [Fact]
     public void Lights_RoundTrip()
     {
         var doc = JklParser.ParseDocument(Jkl);
