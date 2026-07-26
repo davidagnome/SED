@@ -46,6 +46,8 @@ public class MainWindow : Window
     private Level? _currentLevel;         // the model the views are editing
     private List<GobEntry> _levels = new();
     private ConsistencyWindow? _consistencyWindow;
+    private FindWindow? _findWindow;
+    private HeaderEditorWindow? _headerWindow;
 
     public MainWindow()
     {
@@ -338,6 +340,8 @@ public class MainWindow : Window
         _view.SetLevel(level, textures, models, paletteRgb, lightTable);
         _mapView.SetLevel(level);
         _consistencyWindow?.Run();
+        _findWindow?.SetLevel(level);
+        _headerWindow?.SetHeader(level.Header);
         PopulateMaterials();
         int surfaces = level.Sectors.Sum(s => s.Surfaces.Count);
         _status.Text = $"{name} — {level.Sectors.Count} sectors, {surfaces} surfaces, " +
@@ -440,6 +444,46 @@ public class MainWindow : Window
         }
     }
 
+    /// <summary>
+    /// Writes the level as a GOB containing a single `jkl\&lt;name&gt;.jkl` entry —
+    /// the form the game loads. Mirrors the original's "Gob Project" output.
+    /// </summary>
+    private async void SaveGob()
+    {
+        if (_currentDoc is null) { _status.Text = "No level loaded to save."; return; }
+
+        var file = await StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
+        {
+            Title = "Save level as GOB",
+            DefaultExtension = "gob",
+            SuggestedFileName = "edited.gob",
+            FileTypeChoices = new[]
+            {
+                new FilePickerFileType("Sith engine archive (*.gob)") { Patterns = new[] { "*.gob" } },
+            },
+        });
+        if (file is null) return;
+
+        try
+        {
+            var path = file.Path.LocalPath;
+            // The engine finds levels by their archive path, so the entry must be
+            // under jkl\ with a .jkl extension regardless of the archive's name.
+            var entryName = Path.GetFileNameWithoutExtension(path);
+            if (string.IsNullOrEmpty(entryName)) entryName = "level";
+
+            var jkl = JklWriter.Build(_currentDoc);
+            var bytes = System.Text.Encoding.ASCII.GetBytes(jkl);
+            GobWriter.Build(path, new[] { ($"jkl\\{entryName}.jkl", bytes) });
+
+            _status.Text = $"Saved → {file.Name}  (jkl\\{entryName}.jkl, {bytes.Length:N0} bytes)";
+        }
+        catch (Exception ex)
+        {
+            _status.Text = $"GOB save failed: {ex.Message}";
+        }
+    }
+
     private void ClearSession()
     {
         _currentDoc = null;
@@ -467,6 +511,7 @@ public class MainWindow : Window
         var saveAs = new MenuItem { Header = "Save _As…", InputGesture = new KeyGesture(Key.S, KeyModifiers.Control), Icon = Glyph("\uE236") };
         saveAs.Click += (_, _) => SaveAs();
         file.Items.Add(saveAs);
+        file.Items.Add(Item("Save as _GOB…", null, SaveGob));
         file.Items.Add(new Separator());
         file.Items.Add(exit);
 
@@ -596,8 +641,67 @@ public class MainWindow : Window
         tools.Items.Add(Item("Calculate Lighting (_no shadows)", new KeyGesture(Key.F9, KeyModifiers.Shift),
             () => _view.CalculateLighting(castShadows: false)));
         tools.Items.Add(new Separator());
+        tools.Items.Add(Item("Level _Header\u2026", null, ShowHeaderEditor));
+        tools.Items.Add(Item("_Find\u2026", new KeyGesture(Key.F, KeyModifiers.Control | KeyModifiers.Shift), ShowFind));
         tools.Items.Add(Item("_Check Consistency\u2026", new KeyGesture(Key.F8), ShowConsistency));
         return tools;
+    }
+
+    /// <summary>Opens the level-header editor for the loaded level.</summary>
+    private void ShowHeaderEditor()
+    {
+        if (_currentLevel is not { } level)
+        {
+            _status.Text = "Open a level first, then edit its header.";
+            return;
+        }
+
+        if (_headerWindow is not null)
+        {
+            _headerWindow.Rebuild();
+            _headerWindow.Activate();
+            return;
+        }
+
+        var window = new HeaderEditorWindow(level.Header, _view.History);
+        window.Closed += (_, _) => _headerWindow = null;
+        _headerWindow = window;
+        window.Show(this);
+    }
+
+    /// <summary>Opens (or re-runs) the find dialog for the loaded level.</summary>
+    private void ShowFind()
+    {
+        if (_currentLevel is not { } level)
+        {
+            _status.Text = "Open a level first, then use Find.";
+            return;
+        }
+
+        if (_findWindow is not null)
+        {
+            _findWindow.Search();
+            _findWindow.Activate();
+            return;
+        }
+
+        var window = new FindWindow(level)
+        {
+            ResultChosen = result =>
+            {
+                _view.RevealFindResult(result);
+                UpdateInspectorTarget();
+            },
+            ResultsSelected = results =>
+            {
+                _view.SelectFindResults(results);
+                UpdateInspectorTarget();
+                _status.Text = $"Selected {results.Count} match(es).";
+            },
+        };
+        window.Closed += (_, _) => _findWindow = null;
+        _findWindow = window;
+        window.Show(this);
     }
 
     /// <summary>

@@ -689,6 +689,54 @@ public sealed class VulkanView : Control
     /// <summary>Empties the shared selection (Esc, or Edit ▸ Select None).</summary>
     public void ClearSelection() => Selection.Clear();
 
+    /// <summary>
+    /// Moves the camera to look at a world point from a comfortable distance,
+    /// keeping the current view direction so the jump doesn't disorient. Used by
+    /// Find and the consistency window to reveal a result.
+    /// </summary>
+    public void JumpTo(Vec3 target, double distance = 0)
+    {
+        if (distance <= 0) distance = System.Math.Max(1.0, _moveSpeed * 25);
+
+        var dir = Cam().Forward;
+        if (dir.LengthSquared < 1e-9) dir = new Vec3(0, 1, 0);
+
+        _camPos = target - dir.Normalized() * distance;
+        RenderFrame();
+    }
+
+    /// <summary>Selects a found object and frames the camera on it.</summary>
+    public void RevealFindResult(Sed.Core.Query.FindResult result)
+    {
+        using (Selection.Defer())
+        {
+            Selection.Clear();
+            if (result.Surface is { } s) { Selection.Add(s); _activeSector = s.Sector; }
+            else if (result.Thing is { } t) Selection.Add(t);
+            else if (result.Light is { } l) Selection.Add(l);
+            else if (result.Sector is { } sec) { Selection.Add(sec); _activeSector = sec; }
+        }
+
+        JumpTo(result.Position);
+        SelectionChanged?.Invoke(result.Label);
+    }
+
+    /// <summary>Adds every result to the selection without moving the camera.</summary>
+    public void SelectFindResults(IEnumerable<Sed.Core.Query.FindResult> results)
+    {
+        using (Selection.Defer())
+        {
+            Selection.Clear();
+            foreach (var r in results)
+            {
+                if (r.Surface is { } s) { Selection.Add(s); _activeSector = s.Sector; }
+                else if (r.Thing is { } t) Selection.Add(t);
+                else if (r.Light is { } l) Selection.Add(l);
+                else if (r.Sector is { } sec) { Selection.Add(sec); _activeSector = sec; }
+            }
+        }
+    }
+
     // ---- clipboard ----
 
     private LevelFragment? _clipboard;

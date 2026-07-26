@@ -341,6 +341,101 @@ Console.WriteLine();
     level.Lights.Clear();
 }
 
+// ---- Find / query on real data ----
+Console.WriteLine();
+{
+    // Pick a material that actually occurs, then find every surface using it.
+    var sampleMaterial = level.Sectors.SelectMany(s => s.Surfaces)
+        .Select(s => s.Material)
+        .First(m => !string.IsNullOrEmpty(m));
+
+    var byMaterial = Sed.Core.Query.LevelQuery.Run(level, new Sed.Core.Query.FindQuery
+    {
+        Kind = Sed.Core.Query.FindKind.Surface,
+        Text = sampleMaterial,
+    });
+    int actual = level.Sectors.SelectMany(s => s.Surfaces)
+        .Count(s => s.Material.Contains(sampleMaterial, StringComparison.OrdinalIgnoreCase));
+    Check($"find surfaces by material '{sampleMaterial}'", byMaterial.Count == actual && actual > 0,
+        $"{byMaterial.Count} of {actual}");
+
+    // Sky surfaces via a flag mask — a real query a level author would run.
+    var sky = Sed.Core.Query.LevelQuery.Run(level, new Sed.Core.Query.FindQuery
+    {
+        Kind = Sed.Core.Query.FindKind.Surface,
+        FlagMask = SurfaceFlags.SkyCeiling | SurfaceFlags.SkyHorizon,
+    });
+    int actualSky = level.Sectors.SelectMany(s => s.Surfaces).Count(s => s.IsSky);
+    Check("find sky surfaces by flag mask", sky.Count == actualSky, $"{sky.Count} sky surfaces");
+
+    // Every result must carry a usable jump position and the model object.
+    Check("results reference their model object and a position",
+        byMaterial.All(r => r.Surface is not null && r.Sector is not null) &&
+        byMaterial.All(r => double.IsFinite(r.Position.X)));
+
+    // Things by template.
+    var templates = level.Things.Where(t => !string.IsNullOrEmpty(t.Template))
+        .GroupBy(t => t.Template).OrderByDescending(g => g.Count()).FirstOrDefault();
+    if (templates is not null)
+    {
+        var byTemplate = Sed.Core.Query.LevelQuery.Run(level, new Sed.Core.Query.FindQuery
+        {
+            Kind = Sed.Core.Query.FindKind.Thing,
+            Text = templates.Key,
+        });
+        Check($"find things by template '{templates.Key}'", byTemplate.Count >= templates.Count(),
+            $"{byTemplate.Count} found, {templates.Count()} with that exact template");
+    }
+}
+
+// ---- Header editing + GOB output ----
+Console.WriteLine();
+{
+    var header = level.Header;
+    double originalGravity = header.Gravity;
+    float originalMip2 = header.MipmapDistances[2];
+
+    history.Do(HeaderField.Set(header, "gravity", 9.25f, x => x.Gravity, (x, v) => x.Gravity = v));
+    history.Do(HeaderField.Set(header, "mipmap 2", 77f,
+        x => x.MipmapDistances[2], (x, v) => x.MipmapDistances[2] = v));
+
+    var headerPath = Path.Combine(Path.GetTempPath(), $"opsprobe_header_{args[1]}.jkl");
+    JklWriter.Save(doc, headerPath);
+    var headerBack = JklParser.Parse(File.ReadAllText(headerPath));
+
+    Check("header edits survive the JKL round-trip",
+        System.Math.Abs(headerBack.Header.Gravity - 9.25f) < 1e-3 &&
+        System.Math.Abs(headerBack.Header.MipmapDistances[2] - 77f) < 1e-3,
+        $"gravity {headerBack.Header.Gravity:0.##}, mipmap[2] {headerBack.Header.MipmapDistances[2]:0.##}");
+
+    history.Undo();
+    history.Undo();
+    Check("header edits undo",
+        System.Math.Abs(header.Gravity - originalGravity) < 1e-6 &&
+        System.Math.Abs(header.MipmapDistances[2] - originalMip2) < 1e-6);
+
+    // File ▸ Save as GOB: one jkl\<name>.jkl entry, readable back as a level.
+    var gobPath = Path.Combine(Path.GetTempPath(), $"opsprobe_{args[1]}.gob");
+    var jklText = JklWriter.Build(doc);
+    var jklBytes = System.Text.Encoding.ASCII.GetBytes(jklText);
+    Sed.Formats.Gob.GobWriter.Build(gobPath, new[] { ($"jkl\\{args[1]}.jkl", jklBytes) });
+
+    using (var archive = Sed.Formats.Gob.GobArchive.Open(gobPath))
+    {
+        var levelEntries = archive.Entries
+            .Where(e => e.NormalizedName.EndsWith(".jkl", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        Check("GOB contains exactly one level entry under jkl\\", levelEntries.Count == 1,
+            levelEntries.Count == 1 ? levelEntries[0].NormalizedName : $"{levelEntries.Count} entries");
+
+        var fromGob = JklParser.Parse(archive.ReadText(levelEntries[0]));
+        Check("level parses back out of the written GOB",
+            fromGob.Sectors.Count == level.Sectors.Count &&
+            fromGob.Sectors.Sum(s => s.Surfaces.Count) == level.Sectors.Sum(s => s.Surfaces.Count),
+            $"{fromGob.Sectors.Count} sectors, {fromGob.Sectors.Sum(s => s.Surfaces.Count)} surfaces");
+    }
+}
+
 // ---- Consistency checker (Tools ▸ Check Consistency) on real data ----
 Console.WriteLine();
 var issues = Sed.Core.Validation.ConsistencyChecker.Check(reloaded);

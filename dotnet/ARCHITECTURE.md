@@ -296,6 +296,29 @@ length, char[128] name }. Names use `\` separators (e.g. `jkl\01narshadda.jkl`).
      Missing sections with content are now appended at the end of the file;
      sections with no content are still skipped, so opening and saving an untouched
      level does not sprout empty ones.
+41. ~~Find / jump-to~~ ✅ `Sed.Core.Query.LevelQuery` matches sectors, surfaces,
+     things and lights by index, identifying strings (material, name, template,
+     colormap, sound) and an optional flag mask; `FindWindow` (**Ctrl+Shift+F**)
+     lists the hits, selects and frames the camera on the one you click
+     (`VulkanView.JumpTo` keeps the current view direction so the jump does not
+     disorient), and "Select all matches" pushes every hit into the shared
+     selection — so "select every sky surface" or "every crate" becomes a
+     single multi-edit. Verified on retail data: 80 surfaces of one material and
+     103 sky surfaces on `03katarn`, 162 and 142 on `09fuelstation`, each matching
+     an independent count.
+42. ~~Level header editor~~ ✅ `HeaderEditorWindow` (Tools ▸ Level Header…) exposes
+     the ~20 header fields — gravity, ceiling/horizon sky, the mipmap and LOD
+     distance arrays, perspective/gouraud cutoffs, and fog. Rather than twenty
+     near-identical command classes, one generic `SetHeaderFieldCommand<T>`
+     parameterised by a getter/setter pair covers every field, including array
+     elements and the immutable `Vec2` offsets (replaced whole, since a component
+     cannot be assigned). The window rebuilds from the model after each commit, so
+     an undo — from anywhere — is reflected rather than leaving stale text.
+43. ~~Save as GOB~~ ✅ **File ▸ Save as GOB…** writes the edited level into a GOB v2
+     archive as a single `jkl\<name>.jkl` entry, which is where the engine looks
+     for levels regardless of the archive's own filename. Verified by writing a
+     retail level out and parsing it back through `GobArchive` (608 sectors,
+     5,226 surfaces on `03katarn`).
 
 ---
 
@@ -393,10 +416,15 @@ Mirror `Item_edit`, `U_TEMPLATES`/`U_TPLCREATE`, `U_COGFORM`/`U_COGGEN`, `U_CSCE
 - ⬜ **COGs**: no placed-cog symbol-value editor, COG generator, or cutscene helper.
 - Thing create/delete/move/rotate exist ✅.
 
-### P7 — Find / navigate / inspect 🟡
+### P7 — Find / navigate / inspect ✅
 Mirror `Q_Sectors`/`Q_surfs`/`Q_things`, `Jump to Object`.
-- ⬜ Find dialogs (by id/name/flags) for sectors/surfaces/things; jump-to + frame.
-  **Not started** — there is no `FindDialog`.
+- ✅ Find dialog (`FindWindow`, **Ctrl+Shift+F**) for sectors/surfaces/things/lights
+  by index, material, name, template, colormap/sound or flag mask; clicking a
+  result selects it and frames the camera on it; "Select all matches" pushes every
+  hit into the shared selection. Matching lives in `Sed.Core.Query.LevelQuery`.
+- ⬜ The original's full per-field query builder (a comparison operator per field:
+  material, adjoin sector/surface, each flag word separately) — the current dialog
+  covers free text plus one flag mask.
 - ✅ **Sector/surface/thing/vertex/light property inspector** panel with typed
   editors → `IEditCommand`s (milestone 30). Material panel done ✅.
 - ✅ Consistency checker (`CONS_CHECKER`) — `ConsistencyChecker` validates
@@ -407,14 +435,16 @@ Mirror `Q_Sectors`/`Q_surfs`/`Q_things`, `Jump to Object`.
 Mirror `U_LHEADER`, layers, `U_MEDIT`.
 - ✅ HEADER and LAYERS both parse and write faithfully (milestone 24); per-object
   layer assignment is editable from the inspectors.
-- ⬜ Level header editor UI (gravity, sky params, fog, mipmap/LOD,
-  perspective/gouraud) — the data round-trips, but nothing exposes it.
+- ✅ **Level header editor** (`HeaderEditorWindow`, Tools ▸ Level Header…) —
+  gravity, both sky descriptions, mipmap/LOD distance arrays, perspective/gouraud
+  cutoffs and fog, every field an undoable `IEditCommand`.
 - ⬜ Layer visibility toggles; episode editor.
 
 ### P9 — File / GOB project / test-launch 🟡
 Mirror `Gob Project`, `Save JKL and Test`, `FILEOPERATIONS`.
 - ✅ **GOB writer** — `GobWriter.Build` writes GOB v2 archives (milestone 25).
-- ⬜ "Save JKL+GOB" is not yet wired to a menu command.
+- ✅ **File ▸ Save as GOB…** writes the edited level as a single
+  `jkl\<name>.jkl` entry — the layout the engine looks for.
 - ⬜ "Save and test" — launch the game with the level (on macOS: via the user's
   Wine/CrossOver or a configured command).
 - ⬜ Import/export: DF import (`U_DFI`/`DF_IMPORT.INC`), `.3do`/shape export of a

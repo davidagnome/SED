@@ -98,13 +98,13 @@ headlessly so UI changes can be eyeballed without opening a window.
 ```
 WAVE 0 (fully parallel — no inter-dependencies):
   S1 SelectionSet ✅ DONE     L1 LightCalculator ✅ DONE
-  U1 HeaderEditor             U2 LayerPanel
-  U3 TemplateEditor           F1 SaveJklGob
+  U1 HeaderEditor ✅ DONE     F1 SaveJklGob ✅ DONE
+  U2 LayerPanel               U3 TemplateEditor
   G1 Bridge                   T1 TexFlags
 
 WAVE 1:
   S2 BoxSelect ✅ DONE    S3 CopyPaste ✅ DONE    L2 LightEntities ✅ DONE
-  Q1 FindDialogs          U4 CogEditor (needs U3)
+  Q1 FindDialogs ✅ DONE  U4 CogEditor (needs U3)
 
 WAVE 2:
   F2 SaveAndTest (needs F1)    I1 DfImport      I2 ThreeDoExport
@@ -169,12 +169,11 @@ with content are now appended (`SectionRoundTripTests`).
 Each of these has a complete parse + faithful write already; the work is purely
 UI plus the field commands.
 
-### U1 — Header editor
-- **Deps**: none · **Delphi ref**: `U_LHEADER.PAS`
-- **New file**: `src/Sed.App/HeaderEditorWindow.cs`, opened from **Tools**.
-- Typed editors for every `LevelHeader` field (gravity, ceiling/horizon sky,
-  mipmap/LOD distances, perspective/gouraud distance, fog). Each edit is an
-  `IEditCommand` (add `HeaderFieldCommands.cs` alongside the other field commands).
+### U1 — Header editor ✅ DONE
+`src/Sed.App/HeaderEditorWindow.cs` (Tools ▸ Level Header…) + a generic
+`SetHeaderFieldCommand<T>` in `HeaderFieldCommands.cs`. Covers gravity, both sky
+descriptions, the mipmap/LOD arrays, perspective/gouraud and fog; every field is
+its own undo step. Covered by `HeaderFieldTests` and both probes.
 
 ### U2 — Layer panel
 - **Deps**: none · **Delphi ref**: layers in `JED_MAIN`
@@ -195,14 +194,17 @@ UI plus the field commands.
 
 ## TRACK Q — Find / navigate
 
-### Q1 — Find dialogs
-- **Deps**: S1 (so a search can select many results)
-- **Delphi ref**: `Q_SECTORS.PAS`, `Q_SURFS.PAS`, `Q_THINGS.PAS`, `Q_UTILS.PAS`
-- **New file**: `src/Sed.App/FindDialog.cs`.
-- Query sectors / surfaces / things by index, name, template, material or flag
-  mask; results list; jump-to-and-frame the camera on the picked result.
-- `ConsistencyWindow` already demonstrates the results-list-plus-jump pattern —
-  follow it.
+### Q1 — Find dialogs ✅ DONE
+`Sed.Core.Query.LevelQuery` + `src/Sed.App/FindWindow.cs` (**Ctrl+Shift+F**).
+Searches sectors / surfaces / things / lights by index, material, name, template,
+colormap/sound or flag mask; click a result to select and frame it
+(`VulkanView.JumpTo`); "Select all matches" feeds every hit into the selection.
+Covered by `LevelQueryTests` and both probes.
+
+**Remaining**: the original offers a per-field query builder (a comparison
+operator per field — material, adjoin sector/surface, each flag word). The
+current dialog is free text plus one flag mask; extend `FindQuery` if the
+finer-grained form is wanted.
 
 ---
 
@@ -225,7 +227,7 @@ UI plus the field commands.
 
 | Task | Deps | Summary |
 |------|------|---------|
-| F1 Save JKL+GOB | none | `GobWriter` exists; add **File ▸ Save JKL + GOB** |
+| F1 Save JKL+GOB | ✅ DONE | **File ▸ Save as GOB…** writes `jkl\<name>.jkl` into a GOB v2 archive |
 | F2 Save and test | F1 | Launch the game with the level (macOS: user-configured Wine/CrossOver command) |
 | I1 DF import | none | `U_DFI.PAS` / `DF_IMPORT.INC` |
 | I2 3DO export | none | Export a sector as `.3do`; ASC/LEV import |

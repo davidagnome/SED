@@ -7,6 +7,7 @@ using Sed.App;
 using Sed.Core.Editing;
 using Sed.Core.Math;
 using Sed.Core.Model;
+using Sed.Core.Query;
 
 // Drives MapView's real pointer-input path headlessly: rubber-band box select,
 // Ctrl+click toggling, and pan-vs-select modifier routing. These paths live in a
@@ -197,6 +198,51 @@ await session.Dispatch(() =>
     Dispatcher.UIThread.RunJobs();
     Check("thing mode ignores lights", selection.Lights.Count == 0,
         $"{selection.Lights.Count} light(s) picked in thing mode");
+
+    // ---- 6b. Header editor renders and commits through the history ----
+    {
+        var history = new EditHistory();
+        var header = new HeaderEditorWindow(level.Header, history);
+        header.Show();
+        Dispatcher.UIThread.RunJobs();
+
+        Check("header editor renders", header.CaptureRenderedFrame() is not null);
+
+        float before = level.Header.Gravity;
+        history.Do(HeaderField.Set(level.Header, "gravity", before + 5f,
+            x => x.Gravity, (x, v) => x.Gravity = v));
+        header.Rebuild();
+        Dispatcher.UIThread.RunJobs();
+
+        Check("header edit lands on the model", System.Math.Abs(level.Header.Gravity - (before + 5f)) < 1e-6);
+        history.Undo();
+        Check("header edit undoes", System.Math.Abs(level.Header.Gravity - before) < 1e-6);
+
+        header.Close();
+        Dispatcher.UIThread.RunJobs();
+    }
+
+    // ---- 6. Find dialog constructs, queries and reports results ----
+    {
+        var find = new FindWindow(level);
+        find.Show();
+        Dispatcher.UIThread.RunJobs();
+
+        FindResult? chosen = null;
+        find.ResultChosen = r => chosen = r;
+
+        Check("find dialog renders", find.CaptureRenderedFrame() is not null);
+
+        var hits = LevelQuery.Run(level, new FindQuery { Kind = FindKind.Thing, Text = "thing3" });
+        Check("find locates a thing by name", hits.Count == 1 && hits[0].Thing?.Name == "thing3",
+            $"{hits.Count} hit(s)");
+
+        find.ResultChosen?.Invoke(hits[0]);
+        Check("choosing a result raises ResultChosen", chosen is not null && chosen.Thing?.Name == "thing3");
+
+        find.Close();
+        Dispatcher.UIThread.RunJobs();
+    }
 
     // ---- 6. Shift+drag pans instead of selecting ----
     selection.Clear();
