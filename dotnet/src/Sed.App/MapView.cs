@@ -35,16 +35,17 @@ public sealed class MapView : Control
 
     private bool _snap = true;
 
-    // Current selection (synced with the 3D view via callbacks).
-    public Vertex? SelectedVertex { get; private set; }
-    public Thing? SelectedThing { get; private set; }
-    public Surface? SelectedSurface { get; private set; }
-    public Sector? ActiveSector { get; private set; }
+    /// <summary>
+    /// The shared multi-selection — the shell assigns the same instance the 3D
+    /// view owns, so picks in either pane are one selection. Null until assigned,
+    /// in which case this view is read-only.
+    /// </summary>
+    public SelectionSet? Selection { get; set; }
 
-    // External selection setters (called by VulkanView when 3D pick changes).
-    public Action<Vertex?>? SyncVertex;
-    public Action<Thing?>? SyncThing;
-    public Action<Surface?>? SyncSurface;
+    public Vertex? SelectedVertex => Selection?.PrimaryVertex;
+    public Thing? SelectedThing => Selection?.PrimaryThing;
+    public Surface? SelectedSurface => Selection?.PrimarySurface;
+    public Sector? ActiveSector { get; private set; }
 
     // Pointer drag state
     private enum DragMode { None, Pan, Object, Box }
@@ -83,9 +84,6 @@ public sealed class MapView : Control
     public void SetLevel(Level level)
     {
         _level = level;
-        SelectedVertex = null;
-        SelectedThing = null;
-        SelectedSurface = null;
         ActiveSector = null;
         _needsFrame = true;
         if (Bounds.Width > 1) { FrameLevel(); _needsFrame = false; }
@@ -179,17 +177,19 @@ public sealed class MapView : Control
                 }
         context.DrawGeometry(null, EdgePen, geo);
 
-        // Highlight selected surface edges
-        if (SelectedSurface is { } sel && sel.Corners.Count >= 2)
+        // Highlight every selected surface, not just the primary one.
+        if (Selection is { Surfaces.Count: > 0 })
         {
             var sgeo = new StreamGeometry();
             using (var g = sgeo.Open())
-            {
-                g.BeginFigure(ToScreen(sel.Corners[0].Vertex.Position), false);
-                for (int i = 1; i < sel.Corners.Count; i++)
-                    g.LineTo(ToScreen(sel.Corners[i].Vertex.Position));
-                g.EndFigure(true);
-            }
+                foreach (var sel in Selection.Surfaces)
+                {
+                    if (sel.Corners.Count < 2) continue;
+                    g.BeginFigure(ToScreen(sel.Corners[0].Vertex.Position), false);
+                    for (int i = 1; i < sel.Corners.Count; i++)
+                        g.LineTo(ToScreen(sel.Corners[i].Vertex.Position));
+                    g.EndFigure(true);
+                }
             context.DrawGeometry(null, SelectedEdgePen, sgeo);
         }
 
@@ -198,15 +198,24 @@ public sealed class MapView : Control
             foreach (var v in actSec.Vertices)
             {
                 var c = ToScreen(v.Position);
-                var brush = v == SelectedVertex ? SelectBrush : VertexBrush;
+                var brush = Selection?.Contains(v) == true ? SelectBrush : VertexBrush;
                 context.FillRectangle(brush, new Rect(c.X - 3, c.Y - 3, 6, 6));
+            }
+
+        // Selected vertices outside the active sector still need to be visible.
+        if (Selection is not null)
+            foreach (var v in Selection.Vertices)
+            {
+                if (ActiveSector is not null && v.Sector == ActiveSector) continue;
+                var c = ToScreen(v.Position);
+                context.FillRectangle(SelectBrush, new Rect(c.X - 3, c.Y - 3, 6, 6));
             }
 
         // Things
         foreach (var thing in _level.Things)
         {
             var c = ToScreen(thing.Position);
-            var brush = thing == SelectedThing ? SelectBrush : ThingBrush;
+            var brush = Selection?.Contains(thing) == true ? SelectBrush : ThingBrush;
             context.FillRectangle(brush, new Rect(c.X - 3, c.Y - 3, 6, 6));
         }
 
@@ -321,57 +330,63 @@ public sealed class MapView : Control
         _dragged = false;
         e.Pointer.Capture(this);
 
-        if (e.KeyModifiers == KeyModifiers.None)
-        {
-            Vertex? vtx = null;
-            Thing? thing = null;
-            Surface? surf = null;
+        // Ctrl/Cmd extends the selection; Shift and friends still pan.
+        bool extend = e.KeyModifiers.HasFlag(KeyModifiers.Control) || e.KeyModifiers.HasFlag(KeyModifiers.Meta);
+        bool plain = e.KeyModifiers == KeyModifiers.None;
 
-            switch (Mode)
-            {
-                case EditMode.Vertex:
-                    vtx = HitTestVertex(_pressPoint);
-                    break;
-                case EditMode.Thing:
-                    thing = HitTestThing(_pressPoint);
-                    break;
-                case EditMode.Sector:
-                case EditMode.Surface:
-                default:
-                    vtx = HitTestVertex(_pressPoint);
-                    thing = vtx is null ? HitTestThing(_pressPoint) : null;
-                    surf = vtx is null && thing is null ? HitTestSurface(_pressPoint) : null;
-                    break;
-            }
-
-            if (vtx is not null)
-            {
-                SelectVertex(vtx);
-                _dragMode = DragMode.Object;
-                _dragVertex = vtx;
-                _dragThing = null;
-                _dragStartPos = vtx.Position;
-                return;
-            }
-            if (thing is not null)
-            {
-                SelectThing(thing);
-                _dragMode = DragMode.Object;
-                _dragThing = thing;
-                _dragVertex = null;
-                _dragStartPos = thing.Position;
-                return;
-            }
-            if (surf is not null)
-                SelectSurface(surf);
-            _dragMode = DragMode.Pan;
-            _lastDrag = _pressPoint;
-        }
-        else
+        if (!plain && !extend)
         {
             _dragMode = DragMode.Pan;
             _lastDrag = _pressPoint;
+            return;
         }
+
+        Vertex? vtx = null;
+        Thing? thing = null;
+        Surface? surf = null;
+
+        switch (Mode)
+        {
+            case EditMode.Vertex:
+                vtx = HitTestVertex(_pressPoint);
+                break;
+            case EditMode.Thing:
+                thing = HitTestThing(_pressPoint);
+                break;
+            case EditMode.Sector:
+            case EditMode.Surface:
+            default:
+                vtx = HitTestVertex(_pressPoint);
+                thing = vtx is null ? HitTestThing(_pressPoint) : null;
+                surf = vtx is null && thing is null ? HitTestSurface(_pressPoint) : null;
+                break;
+        }
+
+        if (vtx is not null)
+        {
+            SelectVertex(vtx, extend);
+            // Dragging an already-selected item moves the whole selection.
+            _dragMode = DragMode.Object;
+            _dragVertex = vtx;
+            _dragThing = null;
+            _dragStartPos = vtx.Position;
+            return;
+        }
+        if (thing is not null)
+        {
+            SelectThing(thing, extend);
+            _dragMode = DragMode.Object;
+            _dragThing = thing;
+            _dragVertex = null;
+            _dragStartPos = thing.Position;
+            return;
+        }
+
+        if (surf is not null) SelectSurface(surf, extend);
+        else if (!extend) ClearSelection();
+
+        _dragMode = DragMode.Pan;
+        _lastDrag = _pressPoint;
     }
 
     protected override void OnPointerMoved(PointerEventArgs e)
@@ -419,12 +434,7 @@ public sealed class MapView : Control
 
             var delta = DeltaToWorld(du, dv);
             if (delta.LengthSquared > 1e-12)
-            {
-                if (_dragVertex is not null)
-                    History.Do(new MoveVertexCommand(_dragVertex, delta));
-                else if (_dragThing is not null)
-                    History.Do(new MoveThingCommand(_dragThing, delta));
-            }
+                MoveDraggedSelection(delta);
         }
 
         _dragMode = DragMode.None;
@@ -461,45 +471,66 @@ public sealed class MapView : Control
 
     // ---- selection ----
 
-    public void SelectVertex(Vertex? v)
+    /// <summary>
+    /// Moves everything currently selected by <paramref name="delta"/> as one undo
+    /// step. If the dragged object is not itself part of the selection (a plain
+    /// click on something new), only that object moves.
+    /// </summary>
+    private void MoveDraggedSelection(Vec3 delta)
     {
-        SelectedVertex = v;
-        SelectedThing = null;
-        SelectedSurface = null;
-        if (v?.Sector is not null) ActiveSector = v.Sector;
-        SyncVertex?.Invoke(v);
-        SelectionChanged?.Invoke(v is not null ? $"Vertex @ {v.Position}" : null);
+        if (History is null) return;
+
+        var parts = new List<IEditCommand>();
+
+        if (Selection is not null && !Selection.IsEmpty)
+        {
+            var verts = Selection.AffectedVertices();
+            if (verts.Count > 0)
+                parts.Add(new TransformVerticesCommand(verts, TransformVerticesCommand.Translate(delta),
+                    verts.Count == 1 ? "Move vertex" : $"Move {verts.Count} vertices"));
+            foreach (var t in Selection.Things)
+                parts.Add(new MoveThingCommand(t, delta));
+        }
+        else if (_dragVertex is not null) parts.Add(new MoveVertexCommand(_dragVertex, delta));
+        else if (_dragThing is not null) parts.Add(new MoveThingCommand(_dragThing, delta));
+
+        if (parts.Count == 0) return;
+        History.Do(parts.Count == 1 ? parts[0] : new CompositeCommand($"Move {parts.Count} items", parts));
+    }
+
+    public void SelectVertex(Vertex? v, bool extend = false)
+    {
+        if (Selection is null || v is null) { if (!extend) ClearSelection(); return; }
+        if (v.Sector is not null) ActiveSector = v.Sector;
+        if (extend) Selection.Toggle(v); else Selection.SelectOnly(v);
         InvalidateVisual();
     }
 
-    public void SelectThing(Thing? t)
+    public void SelectThing(Thing? t, bool extend = false)
     {
-        SelectedThing = t;
-        SelectedVertex = null;
-        SelectedSurface = null;
-        SyncThing?.Invoke(t);
-        SelectionChanged?.Invoke(t is not null ? $"Thing #{t.Num} '{t.Name}' @ {t.Position}" : null);
+        if (Selection is null || t is null) { if (!extend) ClearSelection(); return; }
+        if (extend) Selection.Toggle(t); else Selection.SelectOnly(t);
         InvalidateVisual();
     }
 
-    public void SelectSurface(Surface? s)
+    public void SelectSurface(Surface? s, bool extend = false)
     {
-        SelectedSurface = s;
-        SelectedVertex = null;
-        SelectedThing = null;
-        if (s is not null) ActiveSector = s.Sector;
-        SyncSurface?.Invoke(s);
-        SelectionChanged?.Invoke(s is not null ? $"Surface {s.Num} (sector {s.Sector.Num})" : null);
+        if (Selection is null || s is null) { if (!extend) ClearSelection(); return; }
+        ActiveSector = s.Sector;
+        if (extend) Selection.Toggle(s); else Selection.SelectOnly(s);
         InvalidateVisual();
     }
 
-    /// <summary>Called by VulkanView to push a selection change into the map view (no callback).</summary>
-    public void NotifySelectionFrom3D(Vertex? v, Thing? t, Surface? s, Sector? activeSec)
+    private void ClearSelection()
     {
-        SelectedVertex = v;
-        SelectedThing = t;
-        SelectedSurface = s;
-        ActiveSector = activeSec;
+        Selection?.Clear();
+        InvalidateVisual();
+    }
+
+    /// <summary>Called by the shell when the shared selection changed elsewhere.</summary>
+    public void NotifySelectionChanged(Sector? activeSec)
+    {
+        if (activeSec is not null) ActiveSector = activeSec;
         InvalidateVisual();
     }
 }

@@ -45,18 +45,24 @@ public sealed class VulkanView : Control
 
     // Selection + editing
     private double _markerSize = 0.1;
-    private Thing? _selectedThing;
-    private Surface? _selectedSurface;
-    private Vertex? _selectedVertex;
     private Sector? _activeSector;        // vertices of this sector are shown for editing
 
     /// <summary>The current editing mode — controls what the picker selects.</summary>
     public EditMode Mode { get; set; } = EditMode.Surface;
 
+    /// <summary>
+    /// The shared multi-selection. <see cref="MainWindow"/> assigns one instance to
+    /// both this view and the <see cref="MapView"/>, so the two stay in lock-step.
+    /// The single-item properties below expose the <em>primary</em> (most recently
+    /// picked) member, which is what the inspector and the surface-mode operations
+    /// act on.
+    /// </summary>
+    public SelectionSet Selection { get; } = new();
+
     public Sector? ActiveSector => _activeSector;
-    public Surface? SelectedSurface => _selectedSurface;
-    public Vertex? SelectedVertex => _selectedVertex;
-    public Thing? SelectedThing => _selectedThing;
+    public Surface? SelectedSurface => Selection.PrimarySurface;
+    public Vertex? SelectedVertex => Selection.PrimaryVertex;
+    public Thing? SelectedThing => Selection.PrimaryThing;
 
     private TextureLookup? _textures;
     private Func<string, ThreeDoModel?>? _models;
@@ -91,6 +97,7 @@ public sealed class VulkanView : Control
         _moveTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(16) };
         _moveTimer.Tick += (_, _) => MoveTick();
         History.Changed += OnHistoryChanged;
+        Selection.Changed += OnSelectionChanged;
         SetLevel(level);
     }
 
@@ -100,12 +107,11 @@ public sealed class VulkanView : Control
         byte[]? paletteRgb = null, byte[]? lightTable = null)
     {
         if (_renderer is null) return;
+        _loadingLevel = true;
         _level = level;
         _textures = textures;
         _models = models;
-        _selectedThing = null;
-        _selectedSurface = null;
-        _selectedVertex = null;
+        Selection.Clear();
         _activeSector = null;
         _renderer.SetSelection(null);
         History.Clear();
@@ -130,6 +136,7 @@ public sealed class VulkanView : Control
 
         FrameLevel(level);
         _markerSize = System.Math.Max(0.02, _moveSpeed * 0.5);
+        _loadingLevel = false;
         RefreshMarkers();
         RenderFrame();
     }
@@ -162,12 +169,30 @@ public sealed class VulkanView : Control
 
     private void OnHistoryChanged()
     {
+        // An undo may have removed objects that are still selected.
+        if (_level is not null) Selection.Prune(_level);
         RebuildScene();
         RefreshMarkers();
         UpdateSelectionHighlight();
         RenderFrame();
         NotifySelection();
     }
+
+    /// <summary>
+    /// Re-highlights whenever the shared selection changes — whether the change
+    /// came from this view, the map view, or the consistency window. Suppressed
+    /// while a level is loading, since the scene is still being rebuilt.
+    /// </summary>
+    private void OnSelectionChanged()
+    {
+        if (_loadingLevel) return;
+        RefreshMarkers();
+        UpdateSelectionHighlight();
+        RenderFrame();
+        NotifySelection();
+    }
+
+    private bool _loadingLevel;
 
     private Camera Cam() => new()
     {
@@ -272,12 +297,19 @@ public sealed class VulkanView : Control
             }
         }
 
-        if (e.Key == Key.Escape) { CancelPendingAdjoin(); e.Handled = true; return; }
+        // Esc backs out of a pending adjoin first, then clears the selection.
+        if (e.Key == Key.Escape)
+        {
+            if (_pendingAdjoin is not null) CancelPendingAdjoin();
+            else ClearSelection();
+            e.Handled = true;
+            return;
+        }
         if (e.Key == Key.B) { CycleBrightness(); e.Handled = true; return; }
 
         if (e.Key == Key.Insert)
         {
-            if (_selectedSurface is not null) History.Do(new InsertSurfaceVertexCommand(_selectedSurface, 0));
+            if (SelectedSurface is { } insertTarget) History.Do(new InsertSurfaceVertexCommand(insertTarget, 0));
             else CreateThing();
             e.Handled = true;
             return;
@@ -294,9 +326,7 @@ public sealed class VulkanView : Control
 
         if (HasSelection && TryMoveDelta(e.Key, out var delta))
         {
-            if (_selectedVertex is not null) History.Do(new MoveVertexCommand(_selectedVertex, delta));
-            else if (_selectedSurface is not null) History.Do(new MoveSurfaceCommand(_selectedSurface, delta));
-            else if (_selectedThing is not null) History.Do(new MoveThingCommand(_selectedThing, delta));
+            MoveSelection(delta);
             e.Handled = true;
             return;
         }
@@ -325,7 +355,7 @@ public sealed class VulkanView : Control
     {
         if (_level is null || _renderer is null) return;
         Thing t;
-        if (_selectedThing is { } sel)
+        if (SelectedThing is { } sel)
         {
             t = new Thing
             {
@@ -344,7 +374,7 @@ public sealed class VulkanView : Control
                 Sector = _activeSector ?? _level.Sectors.FirstOrDefault(),
             };
         }
-        _selectedThing = t; _selectedSurface = null; _selectedVertex = null;
+        Selection.SelectOnly(t);
         History.Do(new CreateThingCommand(_level, t));
     }
 
@@ -356,7 +386,7 @@ public sealed class VulkanView : Control
         var center = _camPos + Cam().Forward * (_moveSpeed * 15);
         double size = System.Math.Max(0.5, _moveSpeed * 8);
         var sector = SectorFactory.CreateBox(_level, center, size, sample?.Material ?? string.Empty, sample?.MaterialIndex ?? 0);
-        _selectedSurface = null; _selectedVertex = null; _selectedThing = null;
+        Selection.Clear();
         _activeSector = sector;
         History.Do(new CreateSectorCommand(_level, sector));
     }
@@ -365,62 +395,106 @@ public sealed class VulkanView : Control
     public void DeleteSector()
     {
         if (_level is null) return;
-        var sec = _selectedSurface?.Sector ?? _activeSector;
+        var sec = SelectedSurface?.Sector ?? _activeSector;
         if (sec is null) { SelectionChanged?.Invoke("Select a surface first, then Delete Sector"); return; }
-        _selectedSurface = null; _selectedVertex = null; _activeSector = null;
+        Selection.Clear();
+        _activeSector = null;
         History.Do(new DeleteSectorCommand(_level, sec));
     }
 
-    /// <summary>Rotates the selected thing's yaw, or the active sector's geometry, about Z.</summary>
+    /// <summary>
+    /// Moves the whole selection by a delta as a single undo step: every selected
+    /// thing, plus every vertex implied by the selected vertices/surfaces/sectors.
+    /// </summary>
+    public void MoveSelection(Vec3 delta)
+    {
+        var parts = new List<IEditCommand>();
+
+        var verts = Selection.AffectedVertices();
+        if (verts.Count > 0)
+            parts.Add(new TransformVerticesCommand(verts, TransformVerticesCommand.Translate(delta),
+                verts.Count == 1 ? "Move vertex" : $"Move {verts.Count} vertices"));
+
+        foreach (var t in Selection.Things)
+            parts.Add(new MoveThingCommand(t, delta));
+
+        if (parts.Count == 0) return;
+        History.Do(parts.Count == 1 ? parts[0] : new CompositeCommand(DescribeSelection("Move"), parts));
+    }
+
+    /// <summary>
+    /// Rotates about Z: selected things spin on their own yaw, selected geometry
+    /// turns about the selection centroid. Falls back to the active sector when
+    /// nothing is explicitly selected.
+    /// </summary>
     private void Rotate(double degrees)
     {
-        if (_selectedThing is { } t) { History.Do(new RotateThingCommand(t, degrees)); return; }
-        if (_activeSector is { } sec && sec.Vertices.Count > 0)
-            History.Do(new TransformVerticesCommand(sec.Vertices,
-                TransformVerticesCommand.RotateZ(SectorCenter(sec), degrees * System.Math.PI / 180.0), "Rotate sector"));
+        var parts = new List<IEditCommand>();
+
+        foreach (var t in Selection.Things)
+            parts.Add(new RotateThingCommand(t, degrees));
+
+        var verts = Selection.AffectedVertices();
+        if (verts.Count == 0 && parts.Count == 0 && _activeSector is { } fallback && fallback.Vertices.Count > 0)
+            verts = fallback.Vertices.ToList();
+
+        if (verts.Count > 0)
+            parts.Add(new TransformVerticesCommand(verts,
+                TransformVerticesCommand.RotateZ(TransformVerticesCommand.Centroid(verts), degrees * System.Math.PI / 180.0),
+                "Rotate geometry"));
+
+        if (parts.Count == 0) return;
+        History.Do(parts.Count == 1 ? parts[0] : new CompositeCommand(DescribeSelection("Rotate"), parts));
     }
 
-    /// <summary>Scales the active sector's geometry about its centre.</summary>
+    /// <summary>Scales the selected geometry about its centroid (active sector if nothing is selected).</summary>
     private void ScaleSelection(double factor)
     {
-        if (_activeSector is { } sec && sec.Vertices.Count > 0)
-            History.Do(new TransformVerticesCommand(sec.Vertices,
-                TransformVerticesCommand.Scale(SectorCenter(sec), factor), "Scale sector"));
+        var verts = Selection.AffectedVertices();
+        if (verts.Count == 0 && _activeSector is { } fallback && fallback.Vertices.Count > 0)
+            verts = fallback.Vertices.ToList();
+        if (verts.Count == 0) return;
+
+        History.Do(new TransformVerticesCommand(verts,
+            TransformVerticesCommand.Scale(TransformVerticesCommand.Centroid(verts), factor), "Scale geometry"));
     }
 
-    /// <summary>Assigns a material to the selected surface (no-op if no surface is selected).</summary>
+    private string DescribeSelection(string verb) =>
+        Selection.IsMultiple ? $"{verb} {Selection.Count} items" : verb;
+
+    /// <summary>Assigns a material to every selected surface (no-op if none are selected).</summary>
     public bool SetSelectedSurfaceMaterial(string material, int index)
     {
-        if (_selectedSurface is not { } s) return false;
-        History.Do(new SetMaterialCommand(s, material, index));
-        SelectionChanged?.Invoke($"Material → {material}");
+        if (Selection.Surfaces.Count == 0) return false;
+
+        var parts = Selection.Surfaces
+            .Select(IEditCommand (s) => new SetMaterialCommand(s, material, index))
+            .ToList();
+        History.Do(parts.Count == 1 ? parts[0] : new CompositeCommand($"Set material on {parts.Count} surfaces", parts));
+
+        SelectionChanged?.Invoke(parts.Count == 1
+            ? $"Material → {material}"
+            : $"Material → {material} on {parts.Count} surfaces");
         return true;
     }
 
-    /// <summary>Cycles the selected surface's material to the next available one.</summary>
+    /// <summary>Cycles the primary surface's material, applying the result to the whole selection.</summary>
     private void CycleMaterial()
     {
-        if (_selectedSurface is not { } s || Materials.Count == 0) return;
+        if (SelectedSurface is not { } s || Materials.Count == 0) return;
         int cur = Materials.FindIndex(m => string.Equals(m, s.Material, StringComparison.OrdinalIgnoreCase));
         int next = (cur + 1) % Materials.Count;
-        History.Do(new SetMaterialCommand(s, Materials[next], next));
-        SelectionChanged?.Invoke($"Material → {Materials[next]} (M to cycle)");
+        if (SetSelectedSurfaceMaterial(Materials[next], next))
+            SelectionChanged?.Invoke($"Material → {Materials[next]} (M to cycle)");
     }
 
     /// <summary>Brightens/darkens the selected vertex light, or the active sector's ambient.</summary>
     private void AdjustLight(float delta)
     {
-        if (_selectedVertex is { } v && _activeSector is { } sec)
+        if (SelectedVertex is { } v && _activeSector is { } sec)
             History.Do(SetVertexLightCommand.Adjust(sec, v, delta));
         else if (_activeSector is { } s)
             History.Do(SetSectorAmbientCommand.Adjust(s, delta));
-    }
-
-    private static Vec3 SectorCenter(Sector sector)
-    {
-        var sum = Vec3.Zero;
-        foreach (var v in sector.Vertices) sum += v.Position;
-        return sum * (1.0 / sector.Vertices.Count);
     }
 
     // ---- geometry operations (surface mode) ----
@@ -430,7 +504,7 @@ public sealed class VulkanView : Control
 
     private Surface? RequireSurface(string action)
     {
-        if (_selectedSurface is { } s) return s;
+        if (SelectedSurface is { } s) return s;
         SelectionChanged?.Invoke($"{action}: select a surface first (Surface mode, click a face).");
         return null;
     }
@@ -513,6 +587,25 @@ public sealed class VulkanView : Control
         SelectionChanged?.Invoke("Adjoin cancelled.");
     }
 
+    /// <summary>Empties the shared selection (Esc, or Edit ▸ Select None).</summary>
+    public void ClearSelection() => Selection.Clear();
+
+    /// <summary>Selects every surface of the active sector — a quick way to grab a room.</summary>
+    public void SelectActiveSectorSurfaces()
+    {
+        if (_activeSector is not { } sec)
+        {
+            SelectionChanged?.Invoke("Select All in Sector: pick a surface first.");
+            return;
+        }
+
+        using (Selection.Defer())
+        {
+            Selection.Clear();
+            foreach (var s in sec.Surfaces) Selection.Add(s);
+        }
+    }
+
     // ---- texture mapping operations ----
 
     /// <summary>Texel size of the selected surface's material, defaulting to 64×64.</summary>
@@ -556,22 +649,27 @@ public sealed class VulkanView : Control
         SelectionChanged?.Invoke($"Auto-fitted texture on surface {s.Num} ({w}×{h})");
     }
 
+    /// <summary>Deletes every selected thing and vertex as one undo step.</summary>
     private void DeleteSelected()
     {
         if (_level is null) return;
-        if (_selectedVertex is { } v && _activeSector is { } sec)
-        {
-            _selectedVertex = null;
-            History.Do(new DeleteVertexCommand(sec, v));
-        }
-        else if (_selectedThing is { } t)
-        {
-            _selectedThing = null;
-            History.Do(new DeleteThingCommand(_level, t));
-        }
+
+        var parts = new List<IEditCommand>();
+
+        foreach (var v in Selection.Vertices)
+            if (v.Sector is { } owner)
+                parts.Add(new DeleteVertexCommand(owner, v));
+
+        foreach (var t in Selection.Things)
+            parts.Add(new DeleteThingCommand(_level, t));
+
+        if (parts.Count == 0) return;
+
+        Selection.Clear();
+        History.Do(parts.Count == 1 ? parts[0] : new CompositeCommand($"Delete {parts.Count} items", parts));
     }
 
-    private bool HasSelection => _selectedVertex is not null || _selectedSurface is not null || _selectedThing is not null;
+    private bool HasSelection => !Selection.IsEmpty;
 
     private bool TryMoveDelta(Key key, out Vec3 delta)
     {
@@ -652,7 +750,10 @@ public sealed class VulkanView : Control
 
     protected override void OnPointerReleased(PointerReleasedEventArgs e)
     {
-        if (!_dragging) PickAt(e.GetPosition(this));
+        // Ctrl (or Cmd on macOS) extends the selection instead of replacing it.
+        if (!_dragging)
+            PickAt(e.GetPosition(this),
+                e.KeyModifiers.HasFlag(KeyModifiers.Control) || e.KeyModifiers.HasFlag(KeyModifiers.Meta));
         _lastPointer = null;
         e.Pointer.Capture(null);
     }
@@ -663,102 +764,120 @@ public sealed class VulkanView : Control
         RenderFrame();
     }
 
-    private void PickAt(Point p)
+    /// <summary>
+    /// Picks whatever the active mode targets under the cursor.
+    /// <paramref name="extend"/> (Ctrl/Cmd held) toggles the hit in the selection;
+    /// otherwise the hit replaces the selection, and a miss clears it.
+    /// </summary>
+    private void PickAt(Point p, bool extend)
     {
         if (_renderer is null || _level is null || _lastSize.Width < 1) return;
         double scale = TopLevel.GetTopLevel(this)?.RenderScaling ?? 1.0;
         var ray = Picker.ScreenPointToRay(Cam(), p.X * scale, p.Y * scale, _lastSize.Width, _lastSize.Height);
 
-        _selectedThing = null;
-        _selectedSurface = null;
-        _selectedVertex = null;
-
-        switch (Mode)
+        using (Selection.Defer())
         {
-            case EditMode.Thing:
-                {
-                    var hit = Picker.PickThing(_level, ray, _markerSize * 1.8);
-                    if (hit is not null) _selectedThing = hit.Thing;
-                    break;
-                }
-            case EditMode.Vertex:
-                {
-                    var hit = Picker.PickVertex(_level, ray, _markerSize);
-                    if (hit is not null) { _selectedVertex = hit.Vertex; _activeSector = hit.Sector; }
-                    break;
-                }
-            case EditMode.Sector:
-            case EditMode.Surface:
-            default:
-                {
-                    var sHit = Picker.Pick(_level, ray);
-                    if (sHit is not null)
+            switch (Mode)
+            {
+                case EditMode.Thing:
                     {
-                        _selectedSurface = sHit.Surface;
-                        _activeSector = sHit.Sector;
+                        var hit = Picker.PickThing(_level, ray, _markerSize * 1.8);
+                        if (hit is null) { if (!extend) Selection.Clear(); break; }
+                        if (extend) Selection.Toggle(hit.Thing);
+                        else Selection.SelectOnly(hit.Thing);
+                        break;
                     }
-                    break;
-                }
+                case EditMode.Vertex:
+                    {
+                        var hit = Picker.PickVertex(_level, ray, _markerSize);
+                        if (hit is null) { if (!extend) Selection.Clear(); break; }
+                        _activeSector = hit.Sector;
+                        if (extend) Selection.Toggle(hit.Vertex);
+                        else Selection.SelectOnly(hit.Vertex);
+                        break;
+                    }
+                case EditMode.Sector:
+                case EditMode.Surface:
+                default:
+                    {
+                        var sHit = Picker.Pick(_level, ray);
+                        if (sHit is null) { if (!extend) Selection.Clear(); break; }
+                        _activeSector = sHit.Sector;
+                        if (extend) Selection.Toggle(sHit.Surface);
+                        else Selection.SelectOnly(sHit.Surface);
+                        break;
+                    }
+            }
         }
-
-        RefreshMarkers();
-        UpdateSelectionHighlight();
-        RenderFrame();
-        NotifySelection();
+        // Mutating Selection raises Changed → OnSelectionChanged re-highlights.
     }
 
     private void NotifySelection()
     {
         SelectionChanged?.Invoke(SelectionText());
-        SelectionFromExternal?.Invoke(_selectedVertex, _selectedThing, _selectedSurface, _activeSector);
+        SelectionFromExternal?.Invoke(SelectedVertex, SelectedThing, SelectedSurface, _activeSector);
     }
 
-    /// <summary>Externally set the selection (from MapView drag). Re-highlights without re-picking.</summary>
+    /// <summary>Replaces the selection from outside this view (map pick, jump-to).</summary>
     public void SetExternalSelection(Vertex? v, Thing? t, Surface? s)
     {
-        _selectedVertex = v;
-        _selectedThing = t;
-        _selectedSurface = s;
-        if (v?.Sector is not null) _activeSector = v.Sector;
+        if (v?.Sector is { } vs) _activeSector = vs;
         else if (s is not null) _activeSector = s.Sector;
-        RefreshMarkers();
-        UpdateSelectionHighlight();
-        RenderFrame();
-        SelectionChanged?.Invoke(SelectionText());
+
+        using (Selection.Defer())
+        {
+            Selection.Clear();
+            if (v is not null) Selection.Add(v);
+            if (t is not null) Selection.Add(t);
+            if (s is not null) Selection.Add(s);
+        }
     }
 
     private void UpdateSelectionHighlight()
     {
         if (_renderer is null) return;
 
-        Mesh? sel = null;
         double t = _markerSize * 0.08;
+        var sel = new Mesh();
 
-        if (_selectedVertex is not null)
-            sel = SceneBuilder.BuildMarker(_selectedVertex.Position, _markerSize * 1.1, SelectColor);
-        else if (_selectedThing is not null)
-            sel = SceneBuilder.BuildMarker(_selectedThing.Position, _markerSize * 1.3, SelectColor);
-        else if (_selectedSurface is not null)
-            sel = SceneBuilder.BuildEdgeHighlight(_selectedSurface, t, SelectColor, VertexColor);
-        else if (_activeSector is not null && Mode == EditMode.Sector)
-            sel = SceneBuilder.BuildSectorEdgeHighlight(_activeSector, t, SelectColor, VertexColor);
+        foreach (var v in Selection.Vertices)
+            sel.Append(SceneBuilder.BuildMarker(v.Position, _markerSize * 1.1, SelectColor));
+        foreach (var th in Selection.Things)
+            sel.Append(SceneBuilder.BuildMarker(th.Position, _markerSize * 1.3, SelectColor));
+        foreach (var s in Selection.Surfaces)
+            sel.Append(SceneBuilder.BuildEdgeHighlight(s, t, SelectColor, VertexColor));
+        foreach (var sec in Selection.Sectors)
+            sel.Append(SceneBuilder.BuildSectorEdgeHighlight(sec, t, SelectColor, VertexColor));
 
-        _renderer.SetSelection(sel);
+        if (sel.IsEmpty && _activeSector is not null && Mode == EditMode.Sector)
+            sel.Append(SceneBuilder.BuildSectorEdgeHighlight(_activeSector, t, SelectColor, VertexColor));
+
+        _renderer.SetSelection(sel.IsEmpty ? null : sel);
     }
 
     private string SelectionText()
     {
-        if (_selectedVertex is { } v)
-            return $"Vertex @ {v.Position}  — arrows/PgUp-PgDn move, click a face to pick another, Ctrl+Z undo";
-        if (_selectedThing is { } t)
+        if (Selection.IsMultiple)
+        {
+            var parts = new List<string>();
+            if (Selection.Surfaces.Count > 0) parts.Add($"{Selection.Surfaces.Count} surfaces");
+            if (Selection.Vertices.Count > 0) parts.Add($"{Selection.Vertices.Count} vertices");
+            if (Selection.Things.Count > 0) parts.Add($"{Selection.Things.Count} things");
+            if (Selection.Sectors.Count > 0) parts.Add($"{Selection.Sectors.Count} sectors");
+            return $"Selected {string.Join(", ", parts)} — arrows move all, [ ] rotate, , . scale, Ctrl+click to add/remove";
+        }
+
+        if (SelectedVertex is { } v)
+            return $"Vertex @ {v.Position}  — arrows/PgUp-PgDn move, Ctrl+click to add to selection, Ctrl+Z undo";
+        if (SelectedThing is { } t)
         {
             var name = t.Name.Length > 0 ? t.Name : "?";
-            return $"Thing #{t.Num} '{name}' @ {t.Position}  — arrows/PgUp-PgDn to move, Ctrl+Z undo";
+            return $"Thing #{t.Num} '{name}' @ {t.Position}  — arrows/PgUp-PgDn to move, Ctrl+click to add, Ctrl+Z undo";
         }
-        if (_selectedSurface is { } s)
+        if (SelectedSurface is { } s)
         {
             var mat = string.IsNullOrEmpty(s.Material) ? "(no material)" : s.Material;
-            return $"Sector {s.Sector.Num}, surface {s.Num} — {mat}  (orange dots = vertices; arrows move whole surface)";
+            return $"Sector {s.Sector.Num}, surface {s.Num} — {mat}  (Ctrl+click to add to selection; arrows move it)";
         }
         return "Nothing selected";
     }

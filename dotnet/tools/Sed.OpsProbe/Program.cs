@@ -157,6 +157,46 @@ var dropped = sourceSections.Except(outputSections).OrderBy(s => s).ToList();
 Check($"all {sourceSections.Count} source sections survive the save", dropped.Count == 0,
     dropped.Count == 0 ? string.Join(", ", sourceSections.OrderBy(s => s)) : "dropped: " + string.Join(", ", dropped));
 
+// ---- Multi-selection (SelectionSet) on real data ----
+Console.WriteLine();
+{
+    var sel = new SelectionSet();
+    var sector = level.Sectors[0];
+
+    int events = 0;
+    sel.Changed += () => events++;
+
+    // Ctrl+click behaviour: toggle each surface of a room into the selection.
+    using (sel.Defer())
+        foreach (var s in sector.Surfaces) sel.Toggle(s);
+    Check("bulk select raises one Changed event", events == 1, $"{events} event(s)");
+    Check("every surface of the sector is selected", sel.Surfaces.Count == sector.Surfaces.Count);
+
+    // Shared vertices must be counted once.
+    var verts = sel.AffectedVertices();
+    int corners = sector.Surfaces.Sum(s => s.Corners.Count);
+    Check("shared vertices are deduplicated", verts.Count == verts.Distinct().Count() && verts.Count < corners,
+        $"{corners} corners → {verts.Count} unique vertices");
+
+    // Move the whole selection as one undo step and put it back.
+    var before = verts.Select(v => v.Position).ToList();
+    var nudge = new Sed.Core.Math.Vec3(0.05, 0, 0);
+    history.Do(new TransformVerticesCommand(verts, TransformVerticesCommand.Translate(nudge), "Move selection"));
+    bool moved = verts.Zip(before).All(p => System.Math.Abs(p.First.Position.X - (p.Second.X + 0.05)) < 1e-9);
+    history.Undo();
+    bool restored = verts.Zip(before).All(p => System.Math.Abs(p.First.Position.X - p.Second.X) < 1e-9);
+    Check("multi-vertex move applies once per vertex and fully undoes", moved && restored);
+
+    // Deleting the sector should prune it out of the selection.
+    var doomed = level.Sectors[^1];
+    sel.SelectOnly(doomed);
+    level.Sectors.Remove(doomed);
+    sel.Prune(level);
+    Check("Prune drops objects removed from the level", sel.IsEmpty);
+    level.Sectors.Add(doomed);
+    level.RenumberSectors();
+}
+
 // ---- Consistency checker (Tools ▸ Check Consistency) on real data ----
 Console.WriteLine();
 var issues = Sed.Core.Validation.ConsistencyChecker.Check(reloaded);

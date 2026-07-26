@@ -66,17 +66,19 @@ public class MainWindow : Window
 
         _inspector.SetHistory(_view.History);
 
-        // Share the undo history and selection state between 3D and 2D views.
+        // Share the undo history and the multi-selection between the 3D and 2D
+        // views — one EditHistory, one SelectionSet, so a pick or an edit in
+        // either pane is immediately reflected in the other.
         _mapView.History = _view.History;
+        _mapView.Selection = _view.Selection;
         _mapView.SelectionChanged = desc => { if (desc is not null) _status.Text = desc; };
-        _view.SelectionFromExternal = (v, t, s, sec) =>
+
+        _view.Selection.Changed += () =>
         {
-            _mapView.NotifySelectionFrom3D(v, t, s, sec);
+            _mapView.NotifySelectionChanged(_view.ActiveSector);
             UpdateInspectorTarget();
         };
-        _mapView.SyncVertex = v => { _view.SetExternalSelection(v, null, null); UpdateInspectorTarget(); };
-        _mapView.SyncThing = t => { _view.SetExternalSelection(null, t, null); UpdateInspectorTarget(); };
-        _mapView.SyncSurface = s => { _view.SetExternalSelection(null, null, s); UpdateInspectorTarget(); };
+        _view.SelectionFromExternal = (_, _, _, sec) => _mapView.NotifySelectionChanged(sec);
 
         _view.History.Changed += UpdateInspectorTarget;
 
@@ -480,6 +482,10 @@ public class MainWindow : Window
         var edit = new MenuItem { Header = "_Edit" };
         edit.Items.Add(undo);
         edit.Items.Add(redo);
+        edit.Items.Add(new Separator());
+        edit.Items.Add(Item("Select All in _Sector", new KeyGesture(Key.A, KeyModifiers.Control),
+            () => _view.SelectActiveSectorSurfaces()));
+        edit.Items.Add(Item("Select _None", new KeyGesture(Key.Escape), () => _view.ClearSelection()));
         edit.Items.Add(new Separator());
         edit.Items.Add(newSector);
         edit.Items.Add(delSector);

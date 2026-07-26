@@ -57,6 +57,18 @@ public sealed class TransformVerticesCommand : IEditCommand
     /// <summary>Uniform scale about <paramref name="pivot"/>.</summary>
     public static Func<Vec3, Vec3> Scale(Vec3 pivot, double factor) =>
         p => pivot + (p - pivot) * factor;
+
+    /// <summary>Translation by a constant delta — a multi-vertex move in one command.</summary>
+    public static Func<Vec3, Vec3> Translate(Vec3 delta) => p => p + delta;
+
+    /// <summary>Centroid of a vertex set; <see cref="Vec3.Zero"/> when empty.</summary>
+    public static Vec3 Centroid(IEnumerable<Vertex> vertices)
+    {
+        var sum = Vec3.Zero;
+        int n = 0;
+        foreach (var v in vertices) { sum += v.Position; n++; }
+        return n == 0 ? Vec3.Zero : sum * (1.0 / n);
+    }
 }
 
 /// <summary>Changes a surface's material; reversible.</summary>
