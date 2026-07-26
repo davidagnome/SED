@@ -4,6 +4,7 @@ using Avalonia.Input;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Threading;
+using Sed.Core;
 using Sed.Core.Editing;
 using Sed.Core.Math;
 using Sed.Core.Model;
@@ -238,11 +239,40 @@ public sealed class VulkanView : Control
     {
         if (e.KeyModifiers.HasFlag(KeyModifiers.Control))
         {
-            if (e.Key == Key.Z && e.KeyModifiers.HasFlag(KeyModifiers.Shift)) { History.Redo(); e.Handled = true; return; }
+            bool shift = e.KeyModifiers.HasFlag(KeyModifiers.Shift);
+
+            if (e.Key == Key.Z && shift) { History.Redo(); e.Handled = true; return; }
             if (e.Key == Key.Z) { History.Undo(); e.Handled = true; return; }
             if (e.Key == Key.Y) { History.Redo(); e.Handled = true; return; }
+
+            // Geometry ops
+            if (e.Key == Key.E) { ExtrudeSelectedSurface(shift ? -1.0 : 1.0); e.Handled = true; return; }
+            if (e.Key == Key.F) { FlipSelectedSurface(); e.Handled = true; return; }
+            if (e.Key == Key.K) { CleaveSelectedSurface(); e.Handled = true; return; }
+            if (e.Key == Key.J)
+            {
+                if (shift) RemoveSelectedAdjoin(); else MakeAdjoinStep();
+                e.Handled = true;
+                return;
+            }
+
+            // Texture ops
+            if (e.Key == Key.R) { RotateSelectedTexture(shift ? -15 : 15); e.Handled = true; return; }
+            if (e.Key == Key.T) { AutoTextureSelected(); e.Handled = true; return; }
+            if (e.Key == Key.OemPlus) { ScaleSelectedTexture(1.0 / 0.9); e.Handled = true; return; }
+            if (e.Key == Key.OemMinus) { ScaleSelectedTexture(0.9); e.Handled = true; return; }
+
+            const double texStep = 0.125;   // one eighth of the material, per press
+            switch (e.Key)
+            {
+                case Key.Left: ShiftSelectedTexture(-texStep, 0); e.Handled = true; return;
+                case Key.Right: ShiftSelectedTexture(texStep, 0); e.Handled = true; return;
+                case Key.Up: ShiftSelectedTexture(0, -texStep); e.Handled = true; return;
+                case Key.Down: ShiftSelectedTexture(0, texStep); e.Handled = true; return;
+            }
         }
 
+        if (e.Key == Key.Escape) { CancelPendingAdjoin(); e.Handled = true; return; }
         if (e.Key == Key.B) { CycleBrightness(); e.Handled = true; return; }
 
         if (e.Key == Key.Insert)
@@ -391,6 +421,139 @@ public sealed class VulkanView : Control
         var sum = Vec3.Zero;
         foreach (var v in sector.Vertices) sum += v.Position;
         return sum * (1.0 / sector.Vertices.Count);
+    }
+
+    // ---- geometry operations (surface mode) ----
+
+    /// <summary>The first surface of a pending two-step adjoin, if any.</summary>
+    private Surface? _pendingAdjoin;
+
+    private Surface? RequireSurface(string action)
+    {
+        if (_selectedSurface is { } s) return s;
+        SelectionChanged?.Invoke($"{action}: select a surface first (Surface mode, click a face).");
+        return null;
+    }
+
+    /// <summary>Extrudes the selected surface along its normal; negative pushes inward.</summary>
+    public void ExtrudeSelectedSurface(double sign = 1.0)
+    {
+        if (RequireSurface("Extrude") is not { } s) return;
+        double distance = System.Math.Max(0.05, _moveSpeed * 8) * sign;
+        History.Do(new ExtrudeSurfaceCommand(s, distance));
+        _activeSector = s.Sector;
+        SelectionChanged?.Invoke($"Extruded surface {s.Num} by {distance:0.###} — Ctrl+Z to undo");
+    }
+
+    /// <summary>Reverses the selected surface's winding and normal.</summary>
+    public void FlipSelectedSurface()
+    {
+        if (RequireSurface("Flip") is not { } s) return;
+        History.Do(new FlipSurfaceCommand(s));
+        SelectionChanged?.Invoke($"Flipped surface {s.Num} (normal reversed)");
+    }
+
+    /// <summary>
+    /// Splits the selected surface in half with a plane through its centroid,
+    /// perpendicular to the surface's longest in-plane axis (cuts the long way).
+    /// </summary>
+    public void CleaveSelectedSurface()
+    {
+        if (RequireSurface("Cleave") is not { } s) return;
+        if (s.Corners.Count < 3) { SelectionChanged?.Invoke("Cleave: surface has too few vertices."); return; }
+
+        var (normal, point) = GeometryOps.MidCleavePlane(s);
+
+        int before = s.Sector.Surfaces.Count;
+        History.Do(new CleaveSurfaceCommand(s, normal, point));
+        _activeSector = s.Sector;
+
+        SelectionChanged?.Invoke(s.Sector.Surfaces.Count > before
+            ? $"Cleaved surface {s.Num} into two — Ctrl+Z to undo"
+            : "Cleave: the plane did not intersect the surface (no change).");
+    }
+
+    /// <summary>
+    /// Two-step adjoin: the first call remembers the selected surface, the second
+    /// joins it to the newly selected one as a mirror pair.
+    /// </summary>
+    public void MakeAdjoinStep()
+    {
+        if (RequireSurface("Adjoin") is not { } s) return;
+
+        if (_pendingAdjoin is null || ReferenceEquals(_pendingAdjoin, s))
+        {
+            _pendingAdjoin = s;
+            SelectionChanged?.Invoke(
+                $"Adjoin 1/2: sector {s.Sector.Num} surface {s.Num} — now select the facing surface and repeat.");
+            return;
+        }
+
+        var first = _pendingAdjoin;
+        _pendingAdjoin = null;
+        History.Do(new MakeAdjoinCommand(first, s));
+        SelectionChanged?.Invoke(
+            $"Adjoined sector {first.Sector.Num}/surface {first.Num} ↔ sector {s.Sector.Num}/surface {s.Num}");
+    }
+
+    /// <summary>Clears the selected surface's adjoin (and its mirror).</summary>
+    public void RemoveSelectedAdjoin()
+    {
+        if (RequireSurface("Remove adjoin") is not { } s) return;
+        if (s.Adjoin is null) { SelectionChanged?.Invoke("Remove adjoin: this surface has no adjoin."); return; }
+        History.Do(new RemoveAdjoinCommand(s));
+        SelectionChanged?.Invoke($"Removed adjoin on sector {s.Sector.Num}/surface {s.Num}");
+    }
+
+    /// <summary>Cancels a pending adjoin pick.</summary>
+    public void CancelPendingAdjoin()
+    {
+        if (_pendingAdjoin is null) return;
+        _pendingAdjoin = null;
+        SelectionChanged?.Invoke("Adjoin cancelled.");
+    }
+
+    // ---- texture mapping operations ----
+
+    /// <summary>Texel size of the selected surface's material, defaulting to 64×64.</summary>
+    private (int w, int h) SelectedTextureSize(Surface s)
+    {
+        var tex = _textures?.Invoke(s.Material);
+        return tex is { } t && t.Width > 0 && t.Height > 0 ? (t.Width, t.Height) : (64, 64);
+    }
+
+    /// <summary>Shifts the selected surface's UVs by a fraction of the material size.</summary>
+    public void ShiftSelectedTexture(double duFraction, double dvFraction)
+    {
+        if (RequireSurface("Shift texture") is not { } s) return;
+        var (w, h) = SelectedTextureSize(s);
+        History.Do(new ShiftTextureCommand(s, duFraction * w, dvFraction * h));
+        SelectionChanged?.Invoke($"Shifted texture on surface {s.Num}");
+    }
+
+    /// <summary>Scales the selected surface's UVs about its first corner.</summary>
+    public void ScaleSelectedTexture(double factor)
+    {
+        if (RequireSurface("Scale texture") is not { } s) return;
+        History.Do(new ScaleTextureCommand(s, factor, factor));
+        SelectionChanged?.Invoke($"Scaled texture on surface {s.Num} by {factor:0.##}");
+    }
+
+    /// <summary>Rotates the selected surface's UVs about its first corner.</summary>
+    public void RotateSelectedTexture(double degrees)
+    {
+        if (RequireSurface("Rotate texture") is not { } s) return;
+        History.Do(new RotateTextureCommand(s, degrees));
+        SelectionChanged?.Invoke($"Rotated texture on surface {s.Num} by {degrees:0.#}°");
+    }
+
+    /// <summary>Auto-fits the selected surface's UVs to its material's texel extents.</summary>
+    public void AutoTextureSelected()
+    {
+        if (RequireSurface("Auto-fit texture") is not { } s) return;
+        var (w, h) = SelectedTextureSize(s);
+        History.Do(new AutoTextureCommand(s, w, h));
+        SelectionChanged?.Invoke($"Auto-fitted texture on surface {s.Num} ({w}×{h})");
     }
 
     private void DeleteSelected()

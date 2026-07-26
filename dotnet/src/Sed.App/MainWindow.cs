@@ -43,7 +43,9 @@ public class MainWindow : Window
     private GobArchive[] _materialArchives = Array.Empty<GobArchive>();
     private Sed.Formats.ThreeDo.ModelLibrary? _modelLibrary;
     private JklDocument? _currentDoc;     // for saving the currently loaded level
+    private Level? _currentLevel;         // the model the views are editing
     private List<GobEntry> _levels = new();
+    private ConsistencyWindow? _consistencyWindow;
 
     public MainWindow()
     {
@@ -85,7 +87,7 @@ public class MainWindow : Window
         _materialList = new ListBox { Background = Brushes.Transparent, ItemTemplate = MaterialItemTemplate() };
         _materialList.SelectionChanged += (_, _) => OnMaterialPicked();
 
-        _materialFilter = new TextBox { Watermark = "Filter…", Margin = new Thickness(4, 2) };
+        _materialFilter = new TextBox { PlaceholderText = "Filter…", Margin = new Thickness(4, 2) };
         _materialFilter.TextChanged += (_, _) => FilterMaterials();
 
         var root = new DockPanel();
@@ -329,9 +331,11 @@ public class MainWindow : Window
             catch { textures = null; }
         }
 
+        _currentLevel = level;
         _view.Materials = _currentDoc?.Materials ?? new List<string>();
         _view.SetLevel(level, textures, models, paletteRgb, lightTable);
         _mapView.SetLevel(level);
+        _consistencyWindow?.Run();
         PopulateMaterials();
         int surfaces = level.Sectors.Sum(s => s.Surfaces.Count);
         _status.Text = $"{name} — {level.Sectors.Count} sectors, {surfaces} surfaces, " +
@@ -501,16 +505,138 @@ public class MainWindow : Window
         var brightness = new MenuItem { Header = "Cycle _Brightness", InputGesture = new KeyGesture(Key.B), Icon = Glyph("\uE18C") };
         brightness.Click += (_, _) => _view.CycleBrightness();
         view.Items.Add(brightness);
+
+        var geometry = BuildGeometryMenu();
+        var texturing = BuildTexturingMenu();
+        var tools = BuildToolsMenu();
+
         var help = new MenuItem { Header = "_Help" };
         help.Items.Add(new MenuItem { Header = "About SED" });
 
         var menu = new Menu();
         menu.Items.Add(file);
         menu.Items.Add(edit);
+        menu.Items.Add(geometry);
+        menu.Items.Add(texturing);
+        menu.Items.Add(tools);
         menu.Items.Add(game);
         menu.Items.Add(view);
         menu.Items.Add(help);
         return menu;
+    }
+
+    /// <summary>Surface-mode geometry operations. All act on the 3D view's selected surface.</summary>
+    private MenuItem BuildGeometryMenu()
+    {
+        var geometry = new MenuItem { Header = "_Geometry" };
+
+        geometry.Items.Add(Item("_Extrude Surface", new KeyGesture(Key.E, KeyModifiers.Control),
+            () => _view.ExtrudeSelectedSurface()));
+        geometry.Items.Add(Item("Extrude _Inward", new KeyGesture(Key.E, KeyModifiers.Control | KeyModifiers.Shift),
+            () => _view.ExtrudeSelectedSurface(-1.0)));
+        geometry.Items.Add(new Separator());
+        geometry.Items.Add(Item("_Flip Surface", new KeyGesture(Key.F, KeyModifiers.Control),
+            () => _view.FlipSelectedSurface()));
+        geometry.Items.Add(Item("_Cleave Surface", new KeyGesture(Key.K, KeyModifiers.Control),
+            () => _view.CleaveSelectedSurface()));
+        geometry.Items.Add(new Separator());
+        geometry.Items.Add(Item("Make _Adjoin (pick two)", new KeyGesture(Key.J, KeyModifiers.Control),
+            () => _view.MakeAdjoinStep()));
+        geometry.Items.Add(Item("_Remove Adjoin", new KeyGesture(Key.J, KeyModifiers.Control | KeyModifiers.Shift),
+            () => _view.RemoveSelectedAdjoin()));
+
+        return geometry;
+    }
+
+    /// <summary>Per-surface UV transforms, mirroring the original's &amp;Texturing menu.</summary>
+    private MenuItem BuildTexturingMenu()
+    {
+        var texturing = new MenuItem { Header = "_Texturing" };
+
+        texturing.Items.Add(Item("Shift _Left", new KeyGesture(Key.Left, KeyModifiers.Control),
+            () => _view.ShiftSelectedTexture(-0.125, 0)));
+        texturing.Items.Add(Item("Shift _Right", new KeyGesture(Key.Right, KeyModifiers.Control),
+            () => _view.ShiftSelectedTexture(0.125, 0)));
+        texturing.Items.Add(Item("Shift _Up", new KeyGesture(Key.Up, KeyModifiers.Control),
+            () => _view.ShiftSelectedTexture(0, -0.125)));
+        texturing.Items.Add(Item("Shift _Down", new KeyGesture(Key.Down, KeyModifiers.Control),
+            () => _view.ShiftSelectedTexture(0, 0.125)));
+        texturing.Items.Add(new Separator());
+        texturing.Items.Add(Item("Scale U_p", new KeyGesture(Key.OemPlus, KeyModifiers.Control),
+            () => _view.ScaleSelectedTexture(1.0 / 0.9)));
+        texturing.Items.Add(Item("Scale Do_wn", new KeyGesture(Key.OemMinus, KeyModifiers.Control),
+            () => _view.ScaleSelectedTexture(0.9)));
+        texturing.Items.Add(new Separator());
+        texturing.Items.Add(Item("Rotate _CW", new KeyGesture(Key.R, KeyModifiers.Control),
+            () => _view.RotateSelectedTexture(15)));
+        texturing.Items.Add(Item("Rotate CC_W", new KeyGesture(Key.R, KeyModifiers.Control | KeyModifiers.Shift),
+            () => _view.RotateSelectedTexture(-15)));
+        texturing.Items.Add(new Separator());
+        texturing.Items.Add(Item("_Auto-fit to Surface", new KeyGesture(Key.T, KeyModifiers.Control),
+            () => _view.AutoTextureSelected()));
+
+        return texturing;
+    }
+
+    private MenuItem BuildToolsMenu()
+    {
+        var tools = new MenuItem { Header = "T_ools" };
+        tools.Items.Add(Item("_Check Consistency\u2026", new KeyGesture(Key.F8), ShowConsistency));
+        return tools;
+    }
+
+    /// <summary>
+    /// Builds a menu item and — because Avalonia's <see cref="MenuItem.InputGesture"/>
+    /// is display-only — registers a matching window-level key binding so the
+    /// advertised shortcut actually fires. <see cref="VulkanView"/> handles these
+    /// keys first when it has focus and marks them handled, so they run once.
+    /// </summary>
+    private MenuItem Item(string header, KeyGesture? gesture, Action onClick)
+    {
+        var item = new MenuItem { Header = header, InputGesture = gesture };
+        item.Click += (_, _) => onClick();
+        if (gesture is not null)
+            KeyBindings.Add(new KeyBinding { Gesture = gesture, Command = new RelayCommand(onClick) });
+        return item;
+    }
+
+    private sealed class RelayCommand : System.Windows.Input.ICommand
+    {
+        private readonly Action _run;
+        public RelayCommand(Action run) => _run = run;
+        public event EventHandler? CanExecuteChanged { add { } remove { } }
+        public bool CanExecute(object? parameter) => true;
+        public void Execute(object? parameter) => _run();
+    }
+
+    /// <summary>Opens (or re-runs) the consistency checker for the loaded level.</summary>
+    private void ShowConsistency()
+    {
+        if (_currentLevel is not { } level)
+        {
+            _status.Text = "Open a level first, then run the consistency check.";
+            return;
+        }
+
+        if (_consistencyWindow is not null)
+        {
+            _consistencyWindow.Run();
+            _consistencyWindow.Activate();
+            return;
+        }
+
+        var window = new ConsistencyWindow(level)
+        {
+            IssueSelected = (sector, surface) =>
+            {
+                if (surface is not null) _view.SetExternalSelection(null, null, surface);
+                else if (sector is not null) _view.SetExternalSelection(null, null, sector.Surfaces.FirstOrDefault());
+                UpdateInspectorTarget();
+            },
+        };
+        window.Closed += (_, _) => _consistencyWindow = null;
+        _consistencyWindow = window;
+        window.Show(this);
     }
 
     private static readonly FontFamily Phosphor = new("avares://Sed.App/Assets/Phosphor.ttf#Phosphor");

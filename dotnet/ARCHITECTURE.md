@@ -22,10 +22,11 @@ math. See the repo-root analysis for the full option comparison (Lazarus/LCL vs
 | `Sed.Core` | + `Mat4` (column-major, Vulkan-clip perspective/lookat) | ✅ 9 tests |
 | `Sed.Rendering` | `Camera`, `Mesh`, **`SceneAssembler`** (level surfaces + instanced 3DO models → material batches), `SceneBuilder`, `Picker`, `PngWriter` | ✅ |
 | `Sed.Rendering.Vulkan` | Silk.NET backend; **indexed-texture `SceneRenderer`** — CMP palette + 64-level light ramp shading in-shader, opaque/translucent/flat passes, depth, MVP, selection/marker overlays | ✅ verified on M4 Pro |
-| `Sed.App` | Avalonia shell + `VulkanView`: fly camera; click-pick **things / vertices / surfaces**; arrow-keys move selection (thing/vertex/whole surface) with **live mesh rebuild** + Edit ▸ Undo/Redo; Game menu + File ▸ Open | ✅ |
+| `Sed.App` | Avalonia shell + `VulkanView`: fly camera; click-pick **things / vertices / surfaces**; arrow-keys move selection (thing/vertex/whole surface) with **live mesh rebuild** + Edit ▸ Undo/Redo; mode toolbar + per-mode `InspectorPanel`; **Geometry** / **Texturing** / **Tools** menus (extrude, flip, cleave, adjoin, UV transforms, consistency check); Game menu + File ▸ Open | ✅ |
 | `tools/Sed.GobTool`, `Sed.JklProbe`, `Sed.MatTool`, `Sed.LevelRender` | GOB list / JKL render / MAT→PNG / **textured level → PNG** | ✅ |
 | `tools/Sed.VulkanSmoke`, `Sed.TriangleProbe`, `Sed.SceneProbe`, `Sed.AppShot` | bring-up + capture probes | ✅ |
-| `tests/Sed.Core.Tests` | xUnit | ✅ 89 passing |
+| `tools/Sed.SaveProbe`, `Sed.OpsProbe` | save round-trip / **editing-ops round-trip on retail levels** | ✅ |
+| `tests/Sed.Core.Tests` | xUnit | ✅ 100 passing |
 
 ### Rendering pipeline (verified)
 
@@ -86,7 +87,7 @@ For the work that *remains* to reach feature parity with the original editor, se
    `JK1.GOB`**: all 25 levels parse (20–966 sectors, up to 27k tris). The editor's
    `File ▸ Open` reads a loose `.jkl` or a `.gob` archive and lists its levels in
    the side panel (`tools/Sed.GobTool` does the same from the CLI).
-   Adjoins/COGs/lights/layers not yet parsed.
+   (Adjoins/COGs/lights/layers came later — see milestone 24.)
 
 ### GOB archive format (`Gob/GobArchive`)
 
@@ -185,6 +186,29 @@ length, char[128] name }. Names use `\` separators (e.g. `jkl\01narshadda.jkl`).
      Thing (name, template, sector, position, orientation, layer, template values),
      Light (flags, range, intensity, color, position, layer). All field edits flow
      through `IEditCommand`s.
+31. ~~Geometry/texturing/tools menus~~ ✅ The geometry and texture commands built in
+     milestones 26–27 were implemented and unit-tested but had **no UI surface** —
+     nothing in `Sed.App` referenced them. They are now reachable: a **Geometry**
+     menu (extrude in/out, flip, cleave, make/remove adjoin), a **Texturing** menu
+     (shift/scale/rotate/auto-fit), and **Tools ▸ Check Consistency** (`ConsistencyWindow`,
+     click a row to jump to the offending sector/surface). Because Avalonia's
+     `MenuItem.InputGesture` is display-only, each item also registers a real
+     window-level `KeyBinding`; `VulkanView` handles the same chords first when it
+     has focus and marks them handled, so they fire exactly once.
+     Verified end-to-end by `tools/Sed.OpsProbe` on retail `03katarn`, `07yun`,
+     `09fuelstation` and `14tower`: every op applies, undoes and redoes, and the
+     edited level saves and reparses with matching sector/surface/adjoin counts and
+     all 17 source sections intact.
+32. ~~Robust surface normals~~ ✅ `Surface.RecalcNormal` took the cross product of
+     corners 0/1/2 only, which collapses to a **zero vector** whenever those three
+     are colinear — common in retail geometry. That silently corrupted shading, the
+     extrude direction, `AutoTextureCommand`'s projection axis and `MidCleavePlane`'s
+     basis, and made the consistency checker report false "invalid normal" warnings
+     (161 of 5,219 surfaces on `03katarn`). Replaced with **Newell's method** over
+     every edge — same winding convention, immune to colinear leading corners, and
+     it averages numerical noise so near-planar surfaces stop being flagged.
+     Retail levels now report **0 issues** across 15,676 surfaces; genuinely
+     zero-area surfaces still yield a zero normal and are still flagged.
 
 ---
 
@@ -218,18 +242,23 @@ Mirror `u_multisel.pas`, `u_copypaste.pas`.
 - Copy/paste and **paste-in-place** of things and sector geometry (clipboard = a
   serialized fragment of the model); undoable.
 
-### P3 — Core geometry operations 🟡
+### P3 — Core geometry operations ✅
 Mirror `SAVEJKL.INC`-adjacent ops in `JED_MAIN`/`TBAR_TOOLS`:
-- **Adjoins**: make/remove adjoin between two surfaces (the portal connection);
-  auto-pair mirrors. The model already stores `Surface.Adjoin`/`AdjoinFlags` and
-  the writer emits mirror-pairs — needs the editor command + UI.
-- **Extrude surface** (`ExtrudeSurface`, `ExtrudeAndExpandSurface`) — pull a
-  surface along its normal, generating side surfaces (new room/protrusion).
-- **Cleave / split** (`CleaveSecBySec`, `CleaveSurfBySurf`, `CleaveAdjoin`) — split
-  a sector/surface by another's plane.
-- **Flip surface** (`FlipSurface`), insert vertex (have `InsertSurfaceVertexCommand`
-  🟡), bridge/connect sectors.
-- All as `IEditCommand`s so undo + faithful save come for free.
+- ✅ **Adjoins**: `MakeAdjoinCommand`/`RemoveAdjoinCommand` set and clear the
+  mirror pair. Editor: Geometry ▸ Make Adjoin is a two-step pick (**Ctrl+J** on
+  the first surface, then on the facing one; **Esc** cancels), Remove is
+  **Ctrl+Shift+J**.
+- ✅ **Extrude surface** — `ExtrudeSurfaceCommand` pulls a surface along its
+  normal, generating the new sector, side surfaces and the adjoin.
+  **Ctrl+E** (outward) / **Ctrl+Shift+E** (inward).
+- ✅ **Cleave / split** — `CleaveSurfaceCommand` splits a surface by a plane.
+  **Ctrl+K** cleaves down the middle: `GeometryOps.MidCleavePlane` puts the plane
+  through the centroid, normal along the surface's longest in-plane axis.
+  Cleaving a sector *by another sector's* plane is still to do.
+- ✅ **Flip surface** — `FlipSurfaceCommand` (**Ctrl+F**); insert vertex via
+  `InsertSurfaceVertexCommand` (**Insert**).
+- ⬜ Bridge/connect sectors (composite of cleave + adjoin).
+- All are `IEditCommand`s, so undo and faithful save come for free.
 
 ### P4 — Texture mapping tools ✅
 Mirror the `&Texturing` menu (`ShiftTexture`/`ScaleTexture`/`RotateTexture`,
@@ -237,48 +266,57 @@ auto/fit/align-from-adjoin).
 - ✅ Per-surface UV transforms (offset/scale/rotate) editing `Surface.Corner.Uv`;
   auto-texture (project). `ShiftTextureCommand`, `ScaleTextureCommand`,
   `RotateTextureCommand`, `AutoTextureCommand` — all reversible.
+- ✅ Editor UI: a **Texturing** menu, with **Ctrl+arrows** to shift by ⅛ of the
+  material, **Ctrl+±** to scale, **Ctrl+R** / **Ctrl+Shift+R** to rotate 15°, and
+  **Ctrl+T** to auto-fit. Shift and auto-fit read the real material dimensions.
 - ⬜ Surface flags affecting tex (`SF_DoubleRes`/`HalfRes`, `FF_TexClampX/Y`).
-- ⬜ Align-from-adjoin (stitch); UI key bindings in the editor.
+- ⬜ Align-from-adjoin (stitch).
 - ✅ Commands persist via the existing GEORESOURCE regeneration.
 
 ### P5 — Lighting calculation ⬜
 Mirror `Calculate &Lighting` (`lev_utils.pas`).
 - Static light propagation from point lights to per-vertex intensities
   (`Sed.Lights` → `Surface.Corner.Intensity`), respecting sector ambient/extra.
-- Point-light entities (`TSedLight`) add/edit/delete in the LIGHTS section
-  (parser currently skips LIGHTS — add read + faithful write).
+  **This is the main remaining gap** — nothing computes lighting from the LIGHTS
+  data today.
+- ✅ LIGHTS parse + faithful write (milestone 24); light entities are editable
+  through the Light inspector.
 - Per-vertex/sector/surface light editing exists 🟡 (`SetVertexLight`/`SetSectorAmbient`).
 
-### P6 — Things, templates, COGs (gameplay data) ⬜
+### P6 — Things, templates, COGs (gameplay data) 🟡
 Mirror `Item_edit`, `U_TEMPLATES`/`U_TPLCREATE`, `U_COGFORM`/`U_COGGEN`, `U_CSCENE`.
-- **Item editor**: edit a selected thing's full template params (typed fields).
-- **Template editor/creator**: view/edit/add templates (parser reads them 🟡;
-  add full param model + UI + faithful TEMPLATES write).
-- **COGs**: parse the COGS section (skipped now) + faithful write; placed-cog
-  symbol-value editor; COG generator; cutscene helper.
+- ✅ COGS and TEMPLATES both parse and write faithfully (milestone 24).
+- ✅ **Item editor**: the Thing inspector edits template, name, sector, position,
+  orientation, layer and template values.
+- ⬜ **Template editor/creator**: no UI for viewing/adding templates.
+- ⬜ **COGs**: no placed-cog symbol-value editor, COG generator, or cutscene helper.
 - Thing create/delete/move/rotate exist ✅.
 
-### P7 — Find / navigate / inspect ✅
+### P7 — Find / navigate / inspect 🟡
 Mirror `Q_Sectors`/`Q_surfs`/`Q_things`, `Jump to Object`.
-- Find dialogs (by id/name/flags) for sectors/surfaces/things; jump-to + frame.
-- **Sector/surface/thing property inspector** panel (flags, light, tint, sound,
-  material) with typed editors → `IEditCommand`s. (Material panel done ✅.)
-- Consistency checker (`CONS_CHECKER`): validate normals, adjoins, missing
-  collision/visible flags → a problems list.
+- ⬜ Find dialogs (by id/name/flags) for sectors/surfaces/things; jump-to + frame.
+  **Not started** — there is no `FindDialog`.
+- ✅ **Sector/surface/thing/vertex/light property inspector** panel with typed
+  editors → `IEditCommand`s (milestone 30). Material panel done ✅.
+- ✅ Consistency checker (`CONS_CHECKER`) — `ConsistencyChecker` validates
+  normals, planarity, adjoin mirrors, vertex counts and thing-in-sector, surfaced
+  by **Tools ▸ Check Consistency** (**F8**); selecting a row jumps the views to it.
 
-### P8 — Header / layers / level admin ⬜
+### P8 — Header / layers / level admin 🟡
 Mirror `U_LHEADER`, layers, `U_MEDIT`.
-- Level header editor (gravity, sky params, fog, mipmap/LOD, perspective/gouraud).
-  Parser reads some header fields 🟡; extend + faithful HEADER write.
-- Layers: parse LAYERS (skipped now), per-object layer assignment, visibility
-  toggles. Episode editor.
+- ✅ HEADER and LAYERS both parse and write faithfully (milestone 24); per-object
+  layer assignment is editable from the inspectors.
+- ⬜ Level header editor UI (gravity, sky params, fog, mipmap/LOD,
+  perspective/gouraud) — the data round-trips, but nothing exposes it.
+- ⬜ Layer visibility toggles; episode editor.
 
-### P9 — File / GOB project / test-launch ⬜
+### P9 — File / GOB project / test-launch 🟡
 Mirror `Gob Project`, `Save JKL and Test`, `FILEOPERATIONS`.
-- **GOB writer** (we only read GOBs): build/update a GOB so "Save JKL+GOB" works.
-- "Save and test" — launch the game with the level (on macOS: via the user's
+- ✅ **GOB writer** — `GobWriter.Build` writes GOB v2 archives (milestone 25).
+- ⬜ "Save JKL+GOB" is not yet wired to a menu command.
+- ⬜ "Save and test" — launch the game with the level (on macOS: via the user's
   Wine/CrossOver or a configured command).
-- Import/export: DF import (`U_DFI`/`DF_IMPORT.INC`), `.3do`/shape export of a
+- ⬜ Import/export: DF import (`U_DFI`/`DF_IMPORT.INC`), `.3do`/shape export of a
   sector (`Export Sector as 3DO`), ASC/LEV import.
 
 ### P10 — 3DO model tooling ⬜

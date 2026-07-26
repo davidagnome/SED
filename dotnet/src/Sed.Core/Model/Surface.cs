@@ -53,7 +53,15 @@ public sealed class Surface
 
     public Surface(Sector owner) => Sector = owner;
 
-    /// <summary>Recomputes the polygon normal from the first three non-colinear corners (RecalcAll).</summary>
+    /// <summary>
+    /// Recomputes the polygon normal using Newell's method, which sums the
+    /// contribution of every edge. Taking the cross product of just the first
+    /// three corners returns a zero vector whenever those happen to be colinear
+    /// — common in real levels — which then corrupts shading, extrude direction
+    /// and texture-axis selection. Newell's is immune to that and averages out
+    /// numerical noise on near-planar surfaces. Winding convention is unchanged.
+    /// A genuinely degenerate (zero-area) surface still yields <see cref="Vec3.Zero"/>.
+    /// </summary>
     public void RecalcNormal()
     {
         if (Corners.Count < 3)
@@ -62,9 +70,16 @@ public sealed class Surface
             return;
         }
 
-        var a = Corners[0].Vertex.Position;
-        var b = Corners[1].Vertex.Position;
-        var c = Corners[2].Vertex.Position;
-        Normal = (b - a).Cross(c - a).Normalized();
+        double nx = 0, ny = 0, nz = 0;
+        for (int i = 0; i < Corners.Count; i++)
+        {
+            var cur = Corners[i].Vertex.Position;
+            var nxt = Corners[(i + 1) % Corners.Count].Vertex.Position;
+            nx += (cur.Y - nxt.Y) * (cur.Z + nxt.Z);
+            ny += (cur.Z - nxt.Z) * (cur.X + nxt.X);
+            nz += (cur.X - nxt.X) * (cur.Y + nxt.Y);
+        }
+
+        Normal = new Vec3(nx, ny, nz).Normalized();
     }
 }
