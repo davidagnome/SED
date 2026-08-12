@@ -27,7 +27,7 @@ math. See the repo-root analysis for the full option comparison (Lazarus/LCL vs
 | `tools/Sed.VulkanSmoke`, `Sed.TriangleProbe`, `Sed.SceneProbe`, `Sed.AppShot` | bring-up + capture probes | ✅ |
 | `tools/Sed.SaveProbe`, `Sed.OpsProbe` | save round-trip / **editing-ops round-trip on retail levels** | ✅ |
 | `tools/Sed.UiProbe` | **headless pointer-input probe** (box-select, Ctrl+click, pan routing) | ✅ |
-| `tests/Sed.Core.Tests` | xUnit | ✅ 210 passing |
+| `tests/Sed.Core.Tests` | xUnit | ✅ 243 passing |
 
 ### Rendering pipeline (verified)
 
@@ -402,6 +402,86 @@ length, char[128] name }. Names use `\` separators (e.g. `jkl\01narshadda.jkl`).
      case-insensitively, each pair uploaded the same texture twice and cost an
      extra draw call. Normalising the batch key drops `01narshadda` from **108 to
      104 submeshes** with an identical render.
+52. ~~Asset pickers~~ ✅ Fields that name something now offer a browse button
+     instead of only a raw text box. `AssetCatalog` enumerates the open archives by
+     extension (lazily and cached — a retail install has ~2,000 MATs, ~640 WAVs,
+     ~500 each of COG/KEY and 477 3DOs); `PickerDialog` is a filtered list;
+     `PickerField` combines the two with a still-editable text box, so a value the
+     catalog does not know can be typed anyway.
+     The type information already existed and was simply unused: `TemplateParams`
+     drives the template editor's material/model3d/soundclass/template fields, and
+     `CogScript`'s symbol types drive the COG editor's. **`thing`, `sector` and
+     `surface` symbols pick from the level itself**, labelled by `LevelQuery` so a
+     picker reads exactly like a Find result — those symbols hold bare indices and
+     were previously impossible to set correctly without counting. The surface
+     inspector's material and the thing inspector's template also pick.
+     Verified against retail archives: every material the level uses (94 on
+     `03katarn`) and every placed COG script (25) appears in the catalog.
+53. ~~Cleave sector~~ ✅ `CleaveSectorCommand` ports `CleaveSector` — splits a whole
+     sector by a plane into two adjoined sectors: classify vertices, split every
+     straddling surface, chain the on-plane edges into the cross-section, move the
+     behind-side surfaces and vertices into a new sector, and cap the opening with
+     a mirrored adjoined pair. Because it changes surface ownership and vertex
+     membership across two sectors, it snapshots the affected topology before and
+     after and swaps between them, which keeps object identity stable across
+     undo/redo — adjoin partners in *other* sectors point at these surfaces.
+     The subtle part is **welding the cut vertices**: neighbouring faces cross the
+     plane at the same corner, and the cross-section is chained by vertex identity,
+     so minting a fresh vertex per face leaves four disconnected stubs instead of a
+     closed loop and the cleave silently reports failure. Verified on retail rooms
+     (a 24-surface room splits into 14 + 20 with every adjoin in the level intact).
+54. ~~Connect sectors~~ ✅ `ConnectSectorsCommand` ports `ConnectSectors`: two
+     overlapping sectors describe the same volume twice, which the engine cannot
+     render, so each is cleaved by the other's face planes, the duplicate overlap
+     is deleted and the shared boundaries become portals. Built entirely from
+     existing reversible commands, so undo is just replaying them backwards.
+     **Ctrl+Shift+B** with two sectors selected.
+     One deviation from a literal port: the original adjoins first and deletes
+     second, which leaves one boundary open because the faces it wants are still
+     adjoined to the doomed sector and get skipped. Deleting first frees them, and
+     both boundaries portal — two overlapping boxes become three slabs with a
+     portal pair on each internal boundary.
+55. ~~Delete sector clears inbound adjoins~~ ✅ **Bug fix.** `DeleteSectorCommand`
+     removed a sector from the level but left surfaces in *other* sectors still
+     adjoined to it — portals opening onto a sector that no longer exists. This
+     predates Connect Sectors and affected the plain **Edit ▸ Delete Sector**
+     command; the original clears them via `RemoveSecRefs`. Inbound adjoins are now
+     cleared on delete and restored on undo.
+56. ~~Align texture to neighbour~~ ✅ `AlignTextureToNeighbourCommand` matches a
+     surface's UVs to a neighbour it shares an edge with. The shared edge is the
+     common axis: the reference's mapping is decomposed into a gradient *along*
+     the edge and one *perpendicular* to it, and the target is given both. That is
+     what continuity means for two faces meeting at an angle — they are not
+     coplanar, so there is no single flat projection to share. **Ctrl+Shift+T**.
+57. ~~COG generator~~ ✅ `MasterCogGenerator` + `CogGeneratorWindow`
+     (Tools ▸ Generate Master COG) port `U_COGGEN`: emits the level master COG
+     that registers itself, initialises goals, grants starting weapons and sets
+     the Force rank on a timer. Ammunition follows the original's rules rather
+     than being handed out blindly — energy only for weapons that consume it,
+     power only for the power weapons, rail charges only with the railgun. The
+     generated script is round-tripped through `CogScript.Parse` in the tests, so
+     the editor's own parser validates the generator's output. Goal *strings* live
+     in `cogstrings.uni`, which this does not write — the window says so rather
+     than letting them look handled.
+58. ~~Map view readout~~ ✅ Cursor world coordinates and, while a box is being
+     dragged, the span and diagonal it covers; grid step shown in the legend.
+     Vertex dots now appear for every visible sector in Vertex mode (dimmed
+     outside the active one) so a vertex can be picked without first selecting its
+     sector.
+59. ~~Managed plugin model~~ ✅ `Sed.Plugins` defines the contract —
+     `ISedPlugin`, `PluginCommand`, and a `PluginContext` carrying the **real**
+     `Level`, `EditHistory` and `SelectionSet`. The original needed ~100 COM
+     accessor methods only because a Delphi DLL could not share an object graph;
+     a managed plugin gets the model directly and pushes edits through the undo
+     stack, so plugin changes are ordinary undoable edits.
+     `PluginHost` loads each assembly into its own collectible
+     `AssemblyLoadContext` for dependency isolation, but deliberately resolves
+     **`Sed.Plugins` and `Sed.Core` to the host's copies** — loading those
+     per-plugin would make the plugin's `Level` type a different type from the one
+     it is handed, failing every call with a confusing cast error. A plugin that
+     throws is contained and reported rather than taking down the editor, and a
+     bad assembly in the folder is surfaced in the menu instead of silently
+     skipped.
 
 ---
 
@@ -425,8 +505,8 @@ The Delphi editor edits in **2D top/side/front map panes with a grid** (`JED_MAI
 - ✅ Grid **snap-to-grid** (**G** toggle; snap-to-vertex is future work).
 - ✅ Selection + drag editing in 2D (vertices/things/surfaces) reusing the existing
   `IEditCommand`s; selection sync with the 3D view (bidirectional).
-- ⬜ Box-select; measurement/coords readout; vertex dots for all sectors (currently
-  only the active sector).
+- ✅ Box-select; cursor coordinate + drag-measurement readout; vertex dots for
+  every visible sector in Vertex mode (dimmed outside the active one).
 
 ### P2 — Selection model: multi-select + copy/paste ✅
 Mirror `u_multisel.pas`, `u_copypaste.pas`.
@@ -482,7 +562,11 @@ auto/fit/align-from-adjoin).
   `SlideWall` COG function at runtime. The original's `GetSurfResScale` is dead
   code and its uscale/vscale mapping in `LEVEL_IO.INC` is commented out, so
   scaling UVs by them would disagree with both the game and the original editor.
-- ⬜ Align-from-adjoin (stitch).
+- ✅ Align-to-neighbour — matches a surface's UVs to one it shares an edge with,
+  so the texture runs continuously across the seam (**Ctrl+Shift+T**).
+- ❌ `FF_TexNoFiltering` is a non-item here: MAT textures are uploaded as palette
+  *indices* and the sampler must be `Filter.Nearest`, because interpolating index
+  values produces garbage. Every surface already behaves as "no filtering".
 - ✅ Commands persist via the existing GEORESOURCE regeneration.
 
 ### P5 — Lighting calculation ✅
@@ -509,7 +593,11 @@ Mirror `Item_edit`, `U_TEMPLATES`/`U_TPLCREATE`, `U_COGFORM`/`U_COGGEN`, `U_CSCE
 - ✅ **Placed-COG editor** (`CogEditorWindow`, Tools ▸ COGs…): resolves each
   placed COG's `.cog` script from the archives and labels its positional values
   with the symbol they feed.
-- ⬜ COG generator and cutscene helper (`U_COGGEN`, `U_CSCENE`).
+- ✅ COG **generator** (`U_COGGEN`) — Tools ▸ Generate Master COG.
+- ⬜ **Cutscene helper** (`U_CSCENE`): it is a keyframe previewer — assign a
+  `.key` file and a time per thing, then play it back on the thing's 3DO. That
+  needs a KEY parser and 3DO skeletal animation, neither of which exists; it
+  belongs with the 3DO tooling (P10) rather than with the COG work.
 - Thing create/delete/move/rotate exist ✅.
 
 ### P7 — Find / navigate / inspect ✅
@@ -557,11 +645,12 @@ Mirror `U_OPTIONS`, recent files, recovery.
 - Configurable keybindings, grid/units, recent-files, autosave/backup &
   crash-recovery, multi-game project switching (game-install config done ✅).
 
-### P12 — Extensibility (architectural redesign) ⬜
+### P12 — Extensibility (architectural redesign) ✅
 The original plugin host is **Windows COM + native DLLs** (`SED_COM`,
-`sed_plugins`) — not portable. Parity = a **managed plugin model**: define a
-`Sed.Plugins` contract and load plugin assemblies via `AssemblyLoadContext`
-(cross-platform). Treat as opt-in, last.
+`sed_plugins`) — not portable. Replaced with a **managed plugin model**: the
+`Sed.Plugins` contract plus `PluginHost`, which loads assemblies from a
+`plugins` folder via `AssemblyLoadContext`. A **Plugins** menu lists whatever is
+installed.
 
 ### Cross-cutting notes
 - **Renderer**: 2D map views use Avalonia-native `DrawingContext` (vector); the 3D

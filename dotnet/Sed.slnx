@@ -5,6 +5,7 @@
     <Project Path="src/Sed.Formats/Sed.Formats.csproj" />
     <Project Path="src/Sed.Rendering.Vulkan/Sed.Rendering.Vulkan.csproj" />
     <Project Path="src/Sed.Rendering/Sed.Rendering.csproj" />
+    <Project Path="src/Sed.Plugins/Sed.Plugins.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Sed.Core.Tests/Sed.Core.Tests.csproj" />

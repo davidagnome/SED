@@ -76,12 +76,14 @@ public sealed class MapView : Control
     private static readonly IPen SelectedEdgePen = new Pen(new SolidColorBrush(Color.FromRgb(0xff, 0xe0, 0x33)), 2);
     private static readonly IBrush ThingBrush = new SolidColorBrush(Color.FromRgb(0x33, 0xd0, 0xff));
     private static readonly IBrush VertexBrush = new SolidColorBrush(Color.FromRgb(0xff, 0x80, 0x30));
+    private static readonly IBrush InactiveVertexBrush = new SolidColorBrush(Color.FromRgb(0x80, 0x52, 0x28));
     private static readonly IBrush LightBrush = new SolidColorBrush(Color.FromRgb(0xff, 0xf0, 0x99));
     private static readonly IBrush BoxFillBrush = new SolidColorBrush(Color.FromArgb(0x30, 0xff, 0xe0, 0x33));
     private static readonly IPen BoxPen = new Pen(new SolidColorBrush(Color.FromRgb(0xff, 0xe0, 0x33)), 1,
         new DashStyle(new double[] { 3, 3 }, 0));
 
     private bool _boxExtend;
+    private Point? _cursor;
 
     public MapView()
     {
@@ -217,14 +219,34 @@ public sealed class MapView : Control
             context.DrawGeometry(null, SelectedEdgePen, sgeo);
         }
 
-        // Active sector vertices
-        if (ActiveSector is { } actSec)
+        // Vertex dots. In Vertex mode every visible sector shows them, so a vertex
+        // can be picked without first selecting its sector; otherwise only the
+        // active sector's are drawn, since a whole level's worth is unreadable.
+        if (Mode == EditMode.Vertex)
+        {
+            foreach (var sector in _level.Sectors)
+            {
+                if (!Visible(sector)) continue;
+                bool active = ReferenceEquals(sector, ActiveSector);
+                foreach (var v in sector.Vertices)
+                {
+                    var c = ToScreen(v.Position);
+                    var brush = Selection?.Contains(v) == true ? SelectBrush
+                              : active ? VertexBrush : InactiveVertexBrush;
+                    double r = active ? 3 : 2;
+                    context.FillRectangle(brush, new Rect(c.X - r, c.Y - r, r * 2, r * 2));
+                }
+            }
+        }
+        else if (ActiveSector is { } actSec)
+        {
             foreach (var v in actSec.Vertices)
             {
                 var c = ToScreen(v.Position);
                 var brush = Selection?.Contains(v) == true ? SelectBrush : VertexBrush;
                 context.FillRectangle(brush, new Rect(c.X - 3, c.Y - 3, 6, 6));
             }
+        }
 
         // Selected vertices outside the active sector still need to be visible.
         if (Selection is not null)
@@ -270,11 +292,13 @@ public sealed class MapView : Control
         int selected = Selection?.Count ?? 0;
         var label = new FormattedText(
             $"{_axis} ({(_axis == MapAxis.Top ? "XY" : _axis == MapAxis.Front ? "XZ" : "YZ")})  zoom={_zoom:0.#}  " +
-            $"snap={(_snap ? "on" : "off")}  " +
+            $"snap={(_snap ? "on" : "off")}  grid={_gridStep:0.###}  " +
             (selected > 0 ? $"selected={selected}  " : "") +
             "drag=box-select · shift/middle-drag=pan",
             System.Globalization.CultureInfo.CurrentCulture, FlowDirection.LeftToRight, Typeface.Default, 11, Brushes.Gray);
         context.DrawText(label, new Point(6, 4));
+
+        DrawMeasurement(context);
     }
 
     private void DrawGrid(DrawingContext context)
@@ -488,6 +512,8 @@ public sealed class MapView : Control
     {
         var pos = e.GetPosition(this);
         _currentPoint = pos;
+        _cursor = pos;
+        if (_dragMode == DragMode.None) InvalidateVisual();   // refresh the readout
 
         if (_dragMode == DragMode.Pan)
         {
@@ -543,6 +569,12 @@ public sealed class MapView : Control
         _dragged = false;
         _lastDrag = null;
         e.Pointer.Capture(null);
+    }
+
+    protected override void OnPointerExited(PointerEventArgs e)
+    {
+        _cursor = null;
+        InvalidateVisual();
     }
 
     protected override void OnPointerWheelChanged(PointerWheelEventArgs e)
@@ -636,6 +668,37 @@ public sealed class MapView : Control
             ? "Box select: nothing inside the box"
             : $"Box select: {n} item(s) selected — arrows move all, Ctrl+click to adjust");
         InvalidateVisual();
+    }
+
+    /// <summary>
+    /// Bottom-left readout: the cursor's world position, and while a box is being
+    /// dragged the span it covers — the measuring tool the original's panes have.
+    /// </summary>
+    private void DrawMeasurement(DrawingContext context)
+    {
+        if (_cursor is not { } cursor) return;
+
+        var (u, v) = Unproject(cursor);
+        var axes = _axis switch
+        {
+            MapAxis.Front => ("X", "Z"),
+            MapAxis.Side => ("Y", "Z"),
+            _ => ("X", "Y"),
+        };
+
+        var text = $"{axes.Item1}={u:0.###}  {axes.Item2}={v:0.###}";
+
+        if (_dragMode == DragMode.Box && _dragged)
+        {
+            var (u0, v0) = Unproject(_pressPoint);
+            double du = System.Math.Abs(u - u0), dv = System.Math.Abs(v - v0);
+            text += $"   Δ{axes.Item1}={du:0.###}  Δ{axes.Item2}={dv:0.###}  " +
+                    $"diag={System.Math.Sqrt(du * du + dv * dv):0.###}";
+        }
+
+        var readout = new FormattedText(text, System.Globalization.CultureInfo.CurrentCulture,
+            FlowDirection.LeftToRight, Typeface.Default, 11, Brushes.Gray);
+        context.DrawText(readout, new Point(6, Bounds.Height - 18));
     }
 
     private void DrawBoxSelect(DrawingContext context)

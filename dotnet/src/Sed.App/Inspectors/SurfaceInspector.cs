@@ -7,7 +7,7 @@ namespace Sed.App;
 
 public static class SurfaceInspector
 {
-    public static Control Build(Surface surface, EditHistory history)
+    public static Control Build(Surface surface, EditHistory history, InspectorContext? context = null)
     {
         var p = InspectorPanel.Panel($"Surface {surface.Num} (sector {surface.Sector.Num})");
 
@@ -26,8 +26,9 @@ public static class SurfaceInspector
             })));
 
         p.Children.Add(InspectorPanel.Row("Material",
-            InspectorPanel.TextField(surface.Material, text =>
-                history.Do(new SetMaterialCommand(surface, text, surface.MaterialIndex)))));
+            PickerField.Build(context?.Owner, "Material", surface.Material,
+                () => PickerField.Assets(context?.Assets, ".mat"),
+                text => history.Do(new SetMaterialCommand(surface, text, surface.MaterialIndex)))));
 
         p.Children.Add(InspectorPanel.Row("Geo",
             InspectorPanel.TextField(surface.Geo.ToString(CultureInfo.InvariantCulture), text =>

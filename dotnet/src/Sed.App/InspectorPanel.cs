@@ -8,6 +8,17 @@ using Sed.Core.Model;
 namespace Sed.App;
 
 /// <summary>
+/// What an inspector needs beyond the entity itself in order to offer pickers:
+/// a window to parent the dialog on, the level (for thing/sector/template lists)
+/// and the archive catalog (for asset lists). All optional — inspectors fall back
+/// to plain text fields without it.
+/// </summary>
+public sealed record InspectorContext(
+    Avalonia.Controls.Window? Owner = null,
+    Sed.Core.Model.Level? Level = null,
+    AssetCatalog? Assets = null);
+
+/// <summary>
 /// A contextual inspector panel that rebuilds its content based on the current
 /// EditMode and selection. Mirrors the original SED's adaptive TItemEdit
 /// (ITEM_EDIT.PAS) — one panel, reflowed per entity type.
@@ -18,6 +29,9 @@ public sealed class InspectorPanel : Border
     private EditMode _mode = EditMode.Surface;
     private object? _target;
     private EditHistory? _history;
+
+    /// <summary>Context handed to inspectors so their name fields can offer pickers.</summary>
+    public InspectorContext Context { get; set; } = new();
 
     public InspectorPanel()
     {
@@ -49,9 +63,9 @@ public sealed class InspectorPanel : Border
             content = (_mode, _target) switch
             {
                 (EditMode.Sector,  Sector s)  => SectorInspector.Build(s, _history),
-                (EditMode.Surface, Surface s) => SurfaceInspector.Build(s, _history),
+                (EditMode.Surface, Surface s) => SurfaceInspector.Build(s, _history, Context),
                 (EditMode.Vertex,  Vertex v)  => VertexInspector.Build(v, _history),
-                (EditMode.Thing,   Thing t)   => ThingInspector.Build(t, _history),
+                (EditMode.Thing,   Thing t)   => ThingInspector.Build(t, _history, Context),
                 (EditMode.Light,   Light l)   => LightInspector.Build(l, _history),
                 _ => MakeEmpty(),
             };

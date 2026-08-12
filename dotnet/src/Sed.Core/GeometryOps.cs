@@ -96,6 +96,55 @@ public static class GeometryOps
         return sum * (1.0 / surface.Corners.Count);
     }
 
+    /// <summary>
+    /// Whether two convex sector volumes overlap (`DoSectorsOverlap`). A
+    /// separating-axis test over the sectors' own face planes: if some face of one
+    /// sector has no vertex of the other on its inner side, that plane separates
+    /// them. Relies on sector normals facing **inward**, which retail data does
+    /// uniformly.
+    /// </summary>
+    public static bool SectorsOverlap(Sector a, Sector b) =>
+        NoSeparatingPlane(a, b) && NoSeparatingPlane(b, a);
+
+    private static bool NoSeparatingPlane(Sector sector, Sector other)
+    {
+        foreach (var surf in sector.Surfaces)
+        {
+            if (surf.Corners.Count == 0) continue;
+            surf.RecalcNormal();
+
+            var origin = surf.Corners[0].Vertex.Position;
+            bool anyInside = false;
+
+            foreach (var v in other.Vertices)
+                if (surf.Normal.Dot(v.Position - origin) > 0.01) { anyInside = true; break; }
+
+            if (!anyInside) return false;      // this face's plane separates them
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// Whether two surfaces are coincident and face each other — the condition for
+    /// making them a portal pair. They must lie in the same plane with opposed
+    /// normals, and each one's centroid must fall inside the other.
+    /// </summary>
+    public static bool SurfacesCoincide(Surface a, Surface b, double planeTolerance = 1e-4)
+    {
+        if (ReferenceEquals(a, b)) return false;
+        if (a.Corners.Count < 3 || b.Corners.Count < 3) return false;
+
+        a.RecalcNormal();
+        b.RecalcNormal();
+        if (a.Normal.Dot(b.Normal) > -0.9) return false;
+
+        var pa = a.Corners[0].Vertex.Position;
+        var pb = b.Corners[0].Vertex.Position;
+        if (System.Math.Abs(a.Normal.Dot(pb - pa)) > planeTolerance) return false;
+
+        return PointOnSurface(b, Centroid(a)) && PointOnSurface(a, Centroid(b));
+    }
+
     /// <summary>Classifies a point relative to a plane: -1 (behind), 0 (on), +1 (front).</summary>
     public static int ClassifyPoint(Vec3 point, Vec3 planeNormal, Vec3 planePoint, double epsilon = 1e-6)
     {

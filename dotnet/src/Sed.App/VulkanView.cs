@@ -309,6 +309,7 @@ public sealed class VulkanView : Control
             if (e.Key == Key.D) { DuplicateSelection(); e.Handled = true; return; }
 
             // Geometry ops
+            if (e.Key == Key.B && shift) { ConnectSelectedSectors(); e.Handled = true; return; }
             if (e.Key == Key.B) { BridgeSelectedSurfaces(); e.Handled = true; return; }
             if (e.Key == Key.E) { ExtrudeSelectedSurface(shift ? -1.0 : 1.0); e.Handled = true; return; }
             if (e.Key == Key.F) { FlipSelectedSurface(); e.Handled = true; return; }
@@ -322,6 +323,7 @@ public sealed class VulkanView : Control
 
             // Texture ops
             if (e.Key == Key.R) { RotateSelectedTexture(shift ? -15 : 15); e.Handled = true; return; }
+            if (e.Key == Key.T && shift) { AlignSelectedTextureToNeighbour(); e.Handled = true; return; }
             if (e.Key == Key.T) { AutoTextureSelected(); e.Handled = true; return; }
             if (e.Key == Key.OemPlus) { ScaleSelectedTexture(1.0 / 0.9); e.Handled = true; return; }
             if (e.Key == Key.OemMinus) { ScaleSelectedTexture(0.9); e.Handled = true; return; }
@@ -725,6 +727,45 @@ public sealed class VulkanView : Control
             : $"Bridge: {command.Failure}");
     }
 
+    /// <summary>
+    /// Joins two overlapping sectors into a portalled set. Needs two sectors
+    /// selected (Sector mode, Ctrl+click the second).
+    /// </summary>
+    public void ConnectSelectedSectors()
+    {
+        if (_level is null) return;
+
+        // Selecting surfaces implies their sectors, which is how you usually
+        // point at a room.
+        var sectors = new List<Sector>();
+        foreach (var sec in Selection.Sectors) if (!sectors.Contains(sec)) sectors.Add(sec);
+        foreach (var surf in Selection.Surfaces) if (!sectors.Contains(surf.Sector)) sectors.Add(surf.Sector);
+
+        if (sectors.Count != 2)
+        {
+            SelectionChanged?.Invoke(
+                $"Connect Sectors: select exactly two overlapping sectors (Ctrl+click the second) — {sectors.Count} implied.");
+            return;
+        }
+
+        if (ConnectSectorsCommand.Validate(sectors[0], sectors[1]) is { } problem)
+        {
+            SelectionChanged?.Invoke($"Connect Sectors: {problem}");
+            return;
+        }
+
+        int before = _level.Sectors.Count;
+        var command = new ConnectSectorsCommand(_level, sectors[0], sectors[1]);
+        History.Do(command);
+
+        Selection.Clear();
+        _activeSector = sectors[0];
+
+        SelectionChanged?.Invoke(command.Failure is null
+            ? $"Connected sectors — {before} → {_level.Sectors.Count} sectors, {command.PortalsCreated} portal(s)"
+            : $"Connect Sectors: {command.Failure}");
+    }
+
     /// <summary>Clears the selected surface's adjoin (and its mirror).</summary>
     public void RemoveSelectedAdjoin()
     {
@@ -905,6 +946,33 @@ public sealed class VulkanView : Control
         if (RequireSurface("Rotate texture") is not { } s) return;
         History.Do(new RotateTextureCommand(s, degrees));
         SelectionChanged?.Invoke($"Rotated texture on surface {s.Num} by {degrees:0.#}°");
+    }
+
+    /// <summary>
+    /// Aligns the second-selected surface's UVs to the first, so the texture runs
+    /// continuously across the edge they share.
+    /// </summary>
+    public void AlignSelectedTextureToNeighbour()
+    {
+        if (Selection.Surfaces.Count != 2)
+        {
+            SelectionChanged?.Invoke(
+                "Align texture: select the reference surface, then Ctrl+click the one to align.");
+            return;
+        }
+
+        var reference = Selection.Surfaces[0];
+        var target = Selection.Surfaces[1];
+
+        if (AlignTextureToNeighbourCommand.Validate(target, reference) is { } problem)
+        {
+            SelectionChanged?.Invoke($"Align texture: {problem}");
+            return;
+        }
+
+        History.Do(new AlignTextureToNeighbourCommand(target, reference));
+        SelectionChanged?.Invoke(
+            $"Aligned surface {target.Num} to surface {reference.Num} across their shared edge");
     }
 
     /// <summary>Auto-fits the selected surface's UVs to its material's texel extents.</summary>

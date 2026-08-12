@@ -9,7 +9,7 @@ namespace Sed.App;
 
 public static class ThingInspector
 {
-    public static Control Build(Thing thing, EditHistory history)
+    public static Control Build(Thing thing, EditHistory history, InspectorContext? context = null)
     {
         var p = InspectorPanel.Panel($"Thing {thing.Num}");
 
@@ -17,7 +17,9 @@ public static class ThingInspector
             InspectorPanel.TextField(thing.Name, v => history.Do(new SetThingNameCommand(thing, v)))));
 
         p.Children.Add(InspectorPanel.Row("Template",
-            InspectorPanel.TextField(thing.Template, v => history.Do(new SetThingTemplateCommand(thing, v)))));
+            PickerField.Build(context?.Owner, "Template", thing.Template,
+                () => context?.Level is { } lvl ? PickerField.Templates(lvl) : Array.Empty<PickerItem>(),
+                v => history.Do(new SetThingTemplateCommand(thing, v)))));
 
         int sectorNum = thing.Sector?.Num ?? -1;
         p.Children.Add(InspectorPanel.Row("Sector",

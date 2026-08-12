@@ -45,7 +45,12 @@ public sealed class Surface
     public float UScale = 1f;
     public float VScale = 1f;
 
-    public Sector Sector { get; }
+    /// <summary>
+    /// The owning sector. Settable because cleaving a sector moves whole surfaces
+    /// from one sector to the other rather than rebuilding them — adjoin partners
+    /// point at these objects, so their identity has to survive the split.
+    /// </summary>
+    public Sector Sector { get; set; }
     public List<Corner> Corners { get; } = new();
 
     /// <summary>Cached surface normal, recomputed by <see cref="RecalcNormal"/>.</summary>

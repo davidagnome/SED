@@ -22,6 +22,7 @@ public sealed class CogEditorWindow : Window
 {
     private readonly EditHistory _history;
     private readonly CogScriptLibrary? _scripts;
+    private readonly AssetCatalog? _assets;
 
     private readonly ListBox _list;
     private readonly StackPanel _detail;
@@ -30,11 +31,13 @@ public sealed class CogEditorWindow : Window
     private Level _level;
     private Cog? _selected;
 
-    public CogEditorWindow(Level level, EditHistory history, CogScriptLibrary? scripts)
+    public CogEditorWindow(Level level, EditHistory history, CogScriptLibrary? scripts,
+        AssetCatalog? assets = null)
     {
         _level = level;
         _history = history;
         _scripts = scripts;
+        _assets = assets;
 
         Title = "COGs";
         Width = 760;
@@ -130,7 +133,9 @@ public sealed class CogEditorWindow : Window
 
         Heading($"{cog.Num}: {cog.Name}");
 
-        _detail.Children.Add(InspectorPanel.Row("Script", InspectorPanel.TextField(cog.Name, text =>
+        _detail.Children.Add(InspectorPanel.Row("Script", PickerField.Build(this, "COG script", cog.Name,
+            () => PickerField.Assets(_assets, ".cog"),
+            text =>
         {
             if (string.Equals(text, cog.Name, StringComparison.OrdinalIgnoreCase)) return;
             // A different script means a different symbol layout, so the old
@@ -164,9 +169,9 @@ public sealed class CogEditorWindow : Window
             var value = i < cog.Values.Count ? cog.Values[i] : symbol.Default ?? string.Empty;
 
             var label = $"{symbol.Name}  ({symbol.Type.ToString().ToLowerInvariant()})";
-            var row = InspectorPanel.Row(label, InspectorPanel.TextField(value, text =>
-                Commit(new SetCogValueCommand(cog, index, text.Trim()))));
-            _detail.Children.Add(row);
+            var editor = SymbolEditor(symbol.Type, value, text =>
+                Commit(new SetCogValueCommand(cog, index, text.Trim())));
+            _detail.Children.Add(InspectorPanel.Row(label, editor));
 
             if (!string.IsNullOrWhiteSpace(symbol.Description))
                 _detail.Children.Add(new TextBlock
@@ -192,6 +197,37 @@ public sealed class CogEditorWindow : Window
             });
 
         BuildSymbolReference(script);
+    }
+
+    /// <summary>
+    /// Chooses an editor for a symbol by its type. Asset types browse the
+    /// archives; thing/sector/surface types browse the level itself, listing the
+    /// same descriptions Find shows, because those symbols hold bare indices that
+    /// are otherwise impossible to choose correctly.
+    /// </summary>
+    private Control SymbolEditor(CogSymbolType type, string value, Action<string> onCommit)
+    {
+        switch (type)
+        {
+            case CogSymbolType.Thing:
+                return PickerField.Build(this, "Thing", value,
+                    () => PickerField.LevelObjects(_level, Sed.Core.Query.FindKind.Thing), onCommit);
+            case CogSymbolType.Sector:
+                return PickerField.Build(this, "Sector", value,
+                    () => PickerField.LevelObjects(_level, Sed.Core.Query.FindKind.Sector), onCommit);
+            case CogSymbolType.Surface:
+                return PickerField.Build(this, "Surface", value,
+                    () => PickerField.LevelObjects(_level, Sed.Core.Query.FindKind.Surface), onCommit);
+            case CogSymbolType.Template:
+                return PickerField.Build(this, "Template", value,
+                    () => PickerField.Templates(_level), onCommit);
+        }
+
+        if (AssetCatalog.ExtensionFor(type) is { } extension && _assets is not null)
+            return PickerField.Build(this, type.ToString(), value,
+                () => PickerField.Assets(_assets, extension), onCommit);
+
+        return InspectorPanel.TextField(value, onCommit);
     }
 
     /// <summary>Fallback editor: numbered rows, used when the script is unknown.</summary>

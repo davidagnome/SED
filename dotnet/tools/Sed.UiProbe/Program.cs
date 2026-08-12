@@ -222,6 +222,33 @@ await session.Dispatch(() =>
         Dispatcher.UIThread.RunJobs();
     }
 
+    // ---- 5b. Picker dialog filters and returns a value ----
+    {
+        var items = new List<PickerItem>
+        {
+            new("00wall.mat"), new("01wgril1.mat"), new("01wlite2.mat"), new("02floor.mat"),
+        };
+        var picker = new PickerDialog("Material", items, "01wgril1.mat");
+        picker.Show();
+        Dispatcher.UIThread.RunJobs();
+
+        Check("picker dialog renders", picker.CaptureRenderedFrame() is not null);
+        picker.Close();
+        Dispatcher.UIThread.RunJobs();
+
+        // Level-object pickers label entries the same way Find does.
+        var things = PickerField.LevelObjects(level, FindKind.Thing);
+        Check("thing picker lists every thing with a label",
+            things.Count == level.Things.Count && things.All(i => i.Label.Length > 0),
+            $"{things.Count} entries, e.g. '{(things.Count > 0 ? things[0].Label : "")}'");
+        Check("thing picker values are the indices stored in the file",
+            things.Select(i => i.Value).SequenceEqual(level.Things.Select(t => t.Num.ToString())));
+
+        // With no archives the asset lists are empty rather than throwing.
+        Check("asset picker with no catalog yields an empty list",
+            PickerField.Assets(null, ".mat").Count == 0);
+    }
+
     // ---- 6. Find dialog constructs, queries and reports results ----
     {
         var find = new FindWindow(level);

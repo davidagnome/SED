@@ -130,13 +130,5 @@ public sealed class BridgeSurfacesCommand : IEditCommand
     /// falls inside the other. A pair that failed to trim to a common area will
     /// fail this.
     /// </summary>
-    private static bool Overlaps(Surface a, Surface b)
-    {
-        if (a.Corners.Count < 3 || b.Corners.Count < 3) return false;
-        a.RecalcNormal();
-        b.RecalcNormal();
-
-        return GeometryOps.PointOnSurface(b, GeometryOps.Centroid(a))
-            && GeometryOps.PointOnSurface(a, GeometryOps.Centroid(b));
-    }
+    private static bool Overlaps(Surface a, Surface b) => GeometryOps.SurfacesCoincide(a, b);
 }

@@ -23,6 +23,7 @@ int adj0 = level.Sectors.Sum(s => s.Surfaces.Count(f => f.Adjoin is not null));
 Console.WriteLine($"{entry.Name}: {sec0} sectors, {surf0} surfaces, {adj0} adjoins");
 Console.WriteLine();
 
+
 var history = new EditHistory();
 var failures = new List<string>();
 
@@ -641,6 +642,84 @@ Console.WriteLine();
         history.Undo();
         Check("COG value edit undoes", sample.Values.SequenceEqual(originalValues));
     }
+}
+
+// ---- Asset catalog (drives the pickers) ----
+Console.WriteLine();
+{
+    var catalog = new Sed.App.AssetCatalog(new[] { install.LevelArchive }, install.ResourceArchives);
+
+    foreach (var ext in new[] { ".mat", ".3do", ".wav", ".cog", ".key", ".snd", ".ai" })
+        Console.WriteLine($"    {ext,-6} {catalog.ByExtension(ext).Count,5}");
+
+    var materials = catalog.ByExtension(".mat");
+    Check("material catalog is populated", materials.Count > 100, $"{materials.Count} materials");
+    Check("catalog entries are bare filenames, not archive paths",
+        materials.All(m => !m.Contains('/') && !m.Contains('\\')));
+    Check("catalog is sorted and deduplicated",
+        materials.SequenceEqual(materials.OrderBy(x => x, StringComparer.OrdinalIgnoreCase)) &&
+        materials.Count == materials.Distinct(StringComparer.OrdinalIgnoreCase).Count());
+
+    // Every material the level actually uses should be offerable in the picker.
+    var used = level.Sectors.SelectMany(s => s.Surfaces)
+        .Select(s => s.Material)
+        .Where(m => !string.IsNullOrEmpty(m))
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .ToList();
+    var known = new HashSet<string>(materials, StringComparer.OrdinalIgnoreCase);
+    var missing = used.Where(m => !known.Contains(m)).ToList();
+    Check("every material used by the level appears in the catalog", missing.Count == 0,
+        missing.Count == 0 ? $"{used.Count} in use" : "missing: " + string.Join(", ", missing.Take(5)));
+
+    // Same for the scripts the level places.
+    var cogNames = level.Cogs.Select(c => c.Name).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+    var knownCogs = new HashSet<string>(catalog.ByExtension(".cog"), StringComparer.OrdinalIgnoreCase);
+    Check("every placed COG script appears in the catalog",
+        cogNames.All(knownCogs.Contains), $"{cogNames.Count} distinct scripts");
+}
+
+// ---- Cleave a real sector ----
+Console.WriteLine();
+{
+    // Cut a real room in half through its centroid, along its widest axis.
+    var target = level.Sectors.First(s => s.Vertices.Count >= 8 && s.Surfaces.Count >= 6);
+    var centre = TransformVerticesCommand.Centroid(target.Vertices);
+    int sectorsBefore = level.Sectors.Count;
+    int surfacesBefore = target.Surfaces.Count;
+    int adjoinsBefore = level.Sectors.Sum(s => s.Surfaces.Count(f => f.Adjoin is not null));
+
+    var cleave = new CleaveSectorCommand(level, target, new Sed.Core.Math.Vec3(1, 0, 0), centre);
+    history.Do(cleave);
+
+    Check("cleaving a real sector splits it in two",
+        cleave.Succeeded && level.Sectors.Count == sectorsBefore + 1,
+        $"{sectorsBefore} → {level.Sectors.Count} sectors");
+
+    if (cleave.Succeeded)
+    {
+        var half = cleave.NewSector!;
+        Check("both halves are closed volumes",
+            target.Surfaces.Count >= 4 && half.Surfaces.Count >= 4,
+            $"{target.Surfaces.Count} / {half.Surfaces.Count} surfaces");
+        Check("each half owns the vertices its surfaces reference",
+            new[] { target, half }.All(s => s.Surfaces.All(f => f.Corners.All(c => c.Vertex.Sector == s))));
+        Check("the cut is a valid portal pair",
+            target.Surfaces.Any(f => f.Adjoin is not null && f.Adjoin.Sector == half
+                                     && ReferenceEquals(f.Adjoin.Adjoin, f)));
+
+        // No adjoin anywhere may dangle or lose its mirror.
+        var live = new HashSet<Sector>(level.Sectors);
+        int broken = level.Sectors.SelectMany(s => s.Surfaces)
+            .Count(f => f.Adjoin is { } p && (!live.Contains(p.Sector) || !ReferenceEquals(p.Adjoin, f)));
+        Check("cleaving leaves every adjoin in the level intact", broken == 0, $"{broken} broken");
+    }
+
+    history.Undo();
+    Check("cleaving a sector undoes cleanly",
+        level.Sectors.Count == sectorsBefore &&
+        target.Surfaces.Count == surfacesBefore &&
+        level.Sectors.Sum(s => s.Surfaces.Count(f => f.Adjoin is not null)) == adjoinsBefore,
+        $"{level.Sectors.Count} sectors, {target.Surfaces.Count} surfaces");
 }
 
 // ---- Consistency checker (Tools ▸ Check Consistency) on real data ----

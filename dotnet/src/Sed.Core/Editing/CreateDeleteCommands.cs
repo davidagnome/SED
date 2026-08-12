@@ -55,11 +55,20 @@ public sealed class CreateSectorCommand : IEditCommand
 }
 
 /// <summary>Removes a sector from the level, remembering its position for undo.</summary>
+/// <summary>
+/// Removes a sector from the level, and clears any adjoin that pointed *into* it
+/// (mirroring the original's <c>RemoveSecRefs</c>). Leaving those behind would
+/// give surviving sectors portals opening onto a sector the level no longer has —
+/// the consistency checker flags it and the engine would render through a hole.
+/// </summary>
 public sealed class DeleteSectorCommand : IEditCommand
 {
     private readonly Level _level;
     private readonly Sector _sector;
     private int _index;
+
+    // Adjoins in other sectors that referenced this one, so undo can restore them.
+    private readonly List<(Surface surface, Surface partner, long flags)> _inbound = new();
 
     public DeleteSectorCommand(Level level, Sector sector) { _level = level; _sector = sector; }
 
@@ -69,12 +78,33 @@ public sealed class DeleteSectorCommand : IEditCommand
     {
         _index = _level.Sectors.IndexOf(_sector);
         if (_index >= 0) _level.Sectors.RemoveAt(_index);
+
+        _inbound.Clear();
+        foreach (var other in _level.Sectors)
+            foreach (var surf in other.Surfaces)
+            {
+                if (surf.Adjoin is not { } partner) continue;
+                if (!ReferenceEquals(partner.Sector, _sector)) continue;
+
+                _inbound.Add((surf, partner, surf.AdjoinFlags));
+                surf.Adjoin = null;
+                surf.AdjoinFlags = 0;
+            }
+
         _level.RenumberSectors();
     }
 
     public void Revert()
     {
         if (_index >= 0) _level.Sectors.Insert(System.Math.Min(_index, _level.Sectors.Count), _sector);
+
+        foreach (var (surface, partner, flags) in _inbound)
+        {
+            surface.Adjoin = partner;
+            surface.AdjoinFlags = flags;
+        }
+        _inbound.Clear();
+
         _level.RenumberSectors();
     }
 }

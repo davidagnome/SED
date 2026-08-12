@@ -5,6 +5,7 @@ using Avalonia.Layout;
 using Avalonia.Media;
 using Sed.Core.Editing;
 using Sed.Core.Model;
+using Avalonia.Controls.Primitives;
 
 namespace Sed.App;
 
@@ -21,6 +22,7 @@ namespace Sed.App;
 public sealed class TemplateEditorWindow : Window
 {
     private readonly EditHistory _history;
+    private readonly AssetCatalog? _assets;
     private Level _level;
 
     private readonly TextBox _filter;
@@ -30,10 +32,11 @@ public sealed class TemplateEditorWindow : Window
 
     private Template? _selected;
 
-    public TemplateEditorWindow(Level level, EditHistory history)
+    public TemplateEditorWindow(Level level, EditHistory history, AssetCatalog? assets = null)
     {
         _level = level;
         _history = history;
+        _assets = assets;
 
         Title = "Templates";
         Width = 720;
@@ -155,11 +158,13 @@ public sealed class TemplateEditorWindow : Window
             Commit(new RenameTemplateCommand(_level, tpl, text));
         })));
 
-        _detail.Children.Add(InspectorPanel.Row("Parent", InspectorPanel.TextField(tpl.Parent, text =>
-        {
-            if (string.Equals(text, tpl.Parent, StringComparison.Ordinal)) return;
-            Commit(new SetTemplateParentCommand(tpl, text));
-        })));
+        _detail.Children.Add(InspectorPanel.Row("Parent", PickerField.Build(this, "Parent template", tpl.Parent,
+            () => PickerField.Templates(_level),
+            text =>
+            {
+                if (string.Equals(text, tpl.Parent, StringComparison.Ordinal)) return;
+                Commit(new SetTemplateParentCommand(tpl, text));
+            })));
 
         int users = DeleteTemplateCommand.CountUsers(_level, tpl.Name);
         _detail.Children.Add(new TextBlock
@@ -177,8 +182,11 @@ public sealed class TemplateEditorWindow : Window
             var kind = TemplateParams.Describe(TemplateParams.KindOf(key));
             var label = kind.Length > 0 ? $"{key}  ({kind})" : key;
 
-            var row = InspectorPanel.Row(label, InspectorPanel.TextField(value, text =>
-                Commit(new SetTemplateValueCommand(tpl, paramKey, text))));
+            var kindOf = TemplateParams.KindOf(key);
+            Control editor = ParamEditor(kindOf, value, text =>
+                Commit(new SetTemplateValueCommand(tpl, paramKey, text)));
+
+            var row = InspectorPanel.Row(label, editor);
 
             var remove = SmallButton("×", () => Commit(new SetTemplateValueCommand(tpl, paramKey, null)));
             remove.Margin = new Thickness(4, 0, 0, 0);
@@ -192,6 +200,23 @@ public sealed class TemplateEditorWindow : Window
 
         AddParameterRow(tpl);
         BuildInherited(tpl);
+    }
+
+    /// <summary>
+    /// Chooses an editor for a parameter by its kind: asset kinds get a browse
+    /// button onto the archives, template references onto the level's templates,
+    /// everything else stays a plain text box.
+    /// </summary>
+    private Control ParamEditor(TemplateParamKind kind, string value, Action<string> onCommit)
+    {
+        if (kind == TemplateParamKind.TemplateRef)
+            return PickerField.Build(this, "Template", value, () => PickerField.Templates(_level), onCommit);
+
+        if (AssetCatalog.ExtensionFor(kind) is { } extension && _assets is not null)
+            return PickerField.Build(this, TemplateParams.Describe(kind), value,
+                () => PickerField.Assets(_assets, extension), onCommit);
+
+        return InspectorPanel.TextField(value, onCommit);
     }
 
     /// <summary>A key/value pair plus an Add button, for introducing a new parameter.</summary>

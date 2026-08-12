@@ -52,6 +52,8 @@ public class MainWindow : Window
     private TemplateEditorWindow? _templateWindow;
     private CogEditorWindow? _cogWindow;
     private Sed.Formats.Cogs.CogScriptLibrary? _cogScripts;
+    private AssetCatalog? _assetCatalog;
+    private readonly PluginHost _plugins = new();
 
     public MainWindow()
     {
@@ -346,6 +348,7 @@ public class MainWindow : Window
         }
 
         _currentLevel = level;
+        _inspector.Context = new InspectorContext(this, level, Assets());
         _view.Layers.ShowAll();      // a new level starts fully visible
         _view.Materials = _currentDoc?.Materials ?? new List<string>();
         _view.SetLevel(level, textures, models, paletteRgb, lightTable);
@@ -507,6 +510,7 @@ public class MainWindow : Window
         _levelArchive = null;
         _materialArchives = Array.Empty<GobArchive>();
         _cogScripts = null;
+        _assetCatalog = null;
         _modelLibrary = null;
         _matLibrary = null;
         _materialList.ItemsSource = null;
@@ -682,6 +686,8 @@ public class MainWindow : Window
         var texturing = BuildTexturingMenu();
         var tools = BuildToolsMenu();
 
+        var plugins = BuildPluginsMenu();
+
         var help = new MenuItem { Header = "_Help" };
         help.Items.Add(new MenuItem { Header = "About SED" });
 
@@ -693,8 +699,76 @@ public class MainWindow : Window
         menu.Items.Add(tools);
         menu.Items.Add(game);
         menu.Items.Add(view);
+        menu.Items.Add(plugins);
         menu.Items.Add(help);
         return menu;
+    }
+
+    /// <summary>
+    /// Builds the Plugins menu from whatever managed plugins are installed. The
+    /// menu is always present so the reload action and any load problems are
+    /// discoverable even when nothing is installed.
+    /// </summary>
+    private MenuItem BuildPluginsMenu()
+    {
+        var menu = new MenuItem { Header = "_Plugins" };
+        RefreshPluginsMenu(menu);
+        return menu;
+    }
+
+    private void RefreshPluginsMenu(MenuItem menu)
+    {
+        _plugins.LoadFrom(PluginHost.DefaultDirectory);
+        menu.Items.Clear();
+
+        foreach (var plugin in _plugins.Plugins)
+        {
+            var entry = new MenuItem { Header = plugin.Name };
+            foreach (var command in plugin.Commands)
+            {
+                var item = new MenuItem { Header = command.Label };
+                var captured = command;
+                item.Click += (_, _) => RunPlugin(captured);
+                entry.Items.Add(item);
+            }
+            if (plugin.Commands.Count == 0)
+                entry.Items.Add(new MenuItem { Header = "(no commands)", IsEnabled = false });
+            menu.Items.Add(entry);
+        }
+
+        foreach (var problem in _plugins.Problems)
+            menu.Items.Add(new MenuItem { Header = $"⚠ {problem}", IsEnabled = false });
+
+        if (_plugins.Plugins.Count == 0 && _plugins.Problems.Count == 0)
+            menu.Items.Add(new MenuItem
+            {
+                Header = $"No plugins in {PluginHost.DefaultDirectory}",
+                IsEnabled = false,
+            });
+
+        menu.Items.Add(new Separator());
+        var reload = new MenuItem { Header = "_Reload plugins" };
+        reload.Click += (_, _) =>
+        {
+            RefreshPluginsMenu(menu);
+            _status.Text = $"Loaded {_plugins.Plugins.Count} plugin(s), {_plugins.Problems.Count} problem(s).";
+        };
+        menu.Items.Add(reload);
+    }
+
+    /// <summary>Runs a plugin command against the live level, selection and undo stack.</summary>
+    private void RunPlugin(Sed.Plugins.PluginCommand command)
+    {
+        if (_currentLevel is not { } level)
+        {
+            _status.Text = "Open a level first, then run a plugin.";
+            return;
+        }
+
+        var context = new Sed.Plugins.PluginContext(
+            level, _view.History, _view.Selection, message => _status.Text = message);
+
+        _status.Text = PluginHost.Invoke(command, context);
     }
 
     /// <summary>Surface-mode geometry operations. All act on the 3D view's selected surface.</summary>
@@ -718,6 +792,8 @@ public class MainWindow : Window
             () => _view.RemoveSelectedAdjoin()));
         geometry.Items.Add(Item("_Bridge Two Surfaces", new KeyGesture(Key.B, KeyModifiers.Control),
             () => _view.BridgeSelectedSurfaces()));
+        geometry.Items.Add(Item("Co_nnect Two Sectors", new KeyGesture(Key.B, KeyModifiers.Control | KeyModifiers.Shift),
+            () => _view.ConnectSelectedSectors()));
 
         return geometry;
     }
@@ -748,6 +824,8 @@ public class MainWindow : Window
         texturing.Items.Add(new Separator());
         texturing.Items.Add(Item("_Auto-fit to Surface", new KeyGesture(Key.T, KeyModifiers.Control),
             () => _view.AutoTextureSelected()));
+        texturing.Items.Add(Item("Align to _Neighbour", new KeyGesture(Key.T, KeyModifiers.Control | KeyModifiers.Shift),
+            () => _view.AlignSelectedTextureToNeighbour()));
 
         return texturing;
     }
@@ -789,6 +867,14 @@ public class MainWindow : Window
     }
 
     /// <summary>
+    /// The asset catalog for the open session, built on first use. Both the level
+    /// archive and the resource archives are searched, since materials and models
+    /// can live in either.
+    /// </summary>
+    private AssetCatalog Assets() =>
+        _assetCatalog ??= new AssetCatalog(new[] { _levelArchive }, _materialArchives);
+
+    /// <summary>
     /// Opens the placed-COG editor. Script resolution needs both the level archive
     /// (level-specific scripts) and the resource archives (shared ones).
     /// </summary>
@@ -810,7 +896,7 @@ public class MainWindow : Window
         _cogScripts ??= new Sed.Formats.Cogs.CogScriptLibrary(
             new[] { _levelArchive }, _materialArchives);
 
-        var window = new CogEditorWindow(level, _view.History, _cogScripts);
+        var window = new CogEditorWindow(level, _view.History, _cogScripts, Assets());
         window.Closed += (_, _) => _cogWindow = null;
         _cogWindow = window;
         window.Show(this);
@@ -832,7 +918,7 @@ public class MainWindow : Window
             return;
         }
 
-        var window = new TemplateEditorWindow(level, _view.History);
+        var window = new TemplateEditorWindow(level, _view.History, Assets());
         window.Closed += (_, _) => _templateWindow = null;
         _templateWindow = window;
         window.Show(this);

@@ -100,7 +100,7 @@ WAVE 0 (fully parallel — no inter-dependencies):
   S1 SelectionSet ✅ DONE     L1 LightCalculator ✅ DONE
   U1 HeaderEditor ✅ DONE     F1 SaveJklGob ✅ DONE
   U2 LayerPanel ✅ DONE       U3 TemplateEditor ✅ DONE
-  G1 Bridge ✅ DONE           T1 TexFlags 🟡 partial
+  G1 Bridge+Connect ✅ DONE   T1 TexFlags 🟡 partial
 
 WAVE 1:
   S2 BoxSelect ✅ DONE    S3 CopyPaste ✅ DONE    L2 LightEntities ✅ DONE
@@ -111,7 +111,7 @@ WAVE 2:
   X1 UxParity
 
 WAVE 3:
-  P1 PluginModel (last)
+  P1 PluginModel ✅ DONE
 ```
 
 ---
@@ -191,18 +191,21 @@ filter, edit/add/remove parameters, override inherited values, set parent, and
 create/clone/rename/delete. Rename repoints things and child templates.
 Covered by `TemplateEditTests` and `Sed.OpsProbe`.
 
-**Remaining**: no asset pickers yet — a `model3d` or `material` parameter is a
-plain text field even though `TemplateParams` now identifies its kind.
+Asset pickers are wired in (milestone 52).
 
 ### U4 — COG editor 🟡
 - ✅ **Placed-cog symbol-value editor** — `src/Sed.Formats/Cogs/CogScript.cs` +
   `CogScriptLibrary` + `src/Sed.App/CogEditorWindow.cs` (Tools ▸ COGs…), with
   `CogCommands.cs` for add/delete/set-value/set-script. Values are labelled with
   the script symbol they feed. Covered by `CogScriptTests` and `Sed.OpsProbe`.
-- ⬜ COG **generator** (`U_COGGEN.PAS`) — builds a script from a template.
-- ⬜ **Cutscene helper** (`U_CSCENE.PAS`).
-- ⬜ Asset pickers: a `thing`/`sector`/`surface` symbol is edited as a raw index;
-  it could offer a picker or jump-to, now that Find exists.
+- ✅ COG **generator** — `MasterCogGenerator` + `CogGeneratorWindow`
+  (Tools ▸ Generate Master COG).
+- ⬜ **Cutscene helper** (`U_CSCENE.PAS`) — it is a keyframe previewer: assign a
+  `.key` file and a time per thing, then play it back on the thing's 3DO model.
+  That needs a **KEY parser and 3DO skeletal animation**, neither of which exists.
+  It belongs with I3 (3DO tooling), not with the COG work.
+- ✅ Asset pickers: asset symbols browse the archives, and `thing`/`sector`/
+  `surface` symbols browse the level with Find-style labels (milestone 52).
 
 ---
 
@@ -230,8 +233,8 @@ from `LEV_UTILS.PAS`: trims each face by the other's edge planes, then adjoins t
 shared region. Rolls back its own trimming if the results don't overlap.
 Covered by `BridgeTests`.
 
-**Remaining**: `ConnectSectors` (cleave sector-by-sector then adjoin every
-resulting face pair) is not implemented — only the surface-level connect.
+`ConnectSectorsCommand` (**Ctrl+Shift+B**) and `CleaveSectorCommand` complete the
+sector-level half. Covered by `CleaveSectorTests` and `ConnectSectorsTests`.
 
 ### T1 — Texture flag support 🟡
 - ✅ `FF_TexClampX`/`FF_TexClampY` affect rendering — clamp mode is part of the
@@ -242,8 +245,10 @@ resulting face pair) is not implemented — only the surface-level connect.
   `SlideWall` COG function at runtime; the original's `GetSurfResScale` has no
   callers and its uscale/vscale mapping in `LEVEL_IO.INC` is commented out.
   This entry previously asserted the opposite — it was wrong.
-- ⬜ `FF_TexNoFiltering` (sampler filter per surface).
-- ⬜ Align-from-adjoin: stitch a surface's UVs to its neighbour's across a portal.
+- ✅ Align-to-neighbour (`AlignTextureToNeighbourCommand`, **Ctrl+Shift+T**).
+- ❌ `FF_TexNoFiltering` is a non-item: MAT textures are palette *indices*, so the
+  sampler must be `Filter.Nearest` — interpolating indices yields garbage. Every
+  surface already behaves as "no filtering". Do not "implement" this.
 
 ---
 
@@ -257,7 +262,7 @@ resulting face pair) is not implemented — only the surface-level connect.
 | I2 3DO export | none | Export a sector as `.3do`; ASC/LEV import |
 | I3 3DO tooling | none | Hierarchy viewer, standalone preview (`U_3DOS`, `U_3DOFORM`, `U_3DOPREV`) |
 | X1 UX parity | none | Configurable keybindings, recent files, autosave/backup, crash recovery (`U_OPTIONS.PAS`) |
-| P1 Plugin model | none | Managed `Sed.Plugins` contract via `AssemblyLoadContext` (replaces the COM/DLL host; last) |
+| P1 Plugin model | ✅ DONE | `Sed.Plugins` contract + `PluginHost`; Plugins menu. Covered by `PluginHostTests` |
 
 ---
 
