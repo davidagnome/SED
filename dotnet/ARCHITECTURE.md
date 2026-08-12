@@ -631,19 +631,30 @@ Mirror `Gob Project`, `Save JKL and Test`, `FILEOPERATIONS`.
 - ✅ **GOB writer** — `GobWriter.Build` writes GOB v2 archives (milestone 25).
 - ✅ **File ▸ Save as GOB…** writes the edited level as a single
   `jkl\<name>.jkl` entry — the layout the engine looks for.
-- ⬜ "Save and test" — launch the game with the level (on macOS: via the user's
-  Wine/CrossOver or a configured command).
-- ⬜ Import/export: DF import (`U_DFI`/`DF_IMPORT.INC`), `.3do`/shape export of a
-  sector (`Export Sector as 3DO`), ASC/LEV import.
+- ✅ **File ▸ Save GOB and Test…** — writes `Test_<level>.gob` into the project
+  dir (Game ▸ Test Setup…), then launches the game: on Windows the original's
+  generated test batch (`jk.exe -devmode -dispstats -debug log -displayconfig
+  -path <projectdir>`); elsewhere a user-configured Wine/CrossOver command
+  template with `{project}` `{gob}` `{game}` `{gameexe}` `{levelname}`
+  placeholders.
+- ✅ Import/export: **DF import** (`DfLevelImporter`, Tools ▸ Import Dark Forces
+  Level… — wall cycles, ear-clip triangulation, BOT/TOP/MID splits, adjoins,
+  lights, objects, df2jk.lst), **sector → 3DO export** (`ThreeDoWriter` +
+  `ThreeDoExport`, Tools ▸ Export Sector as 3DO…), and **ASC import**
+  (`AscImporter`, Tools ▸ Import 3D Studio ASC…).
 
 ### P10 — 3DO model tooling ⬜
 Mirror `U_3DOS`/`U_3DOFORM`/`U_3doprev` (we render 3DO ✅, don't edit).
-- 3DO hierarchy viewer/editor; standalone 3DO preview window; export sector→3DO.
+- 3DO hierarchy viewer/editor; standalone 3DO preview window; export sector→3DO ✅
+  (Tools ▸ Export Sector as 3DO…).
 
-### P11 — Editor UX parity ⬜
+### P11 — Editor UX parity 🟡
 Mirror `U_OPTIONS`, recent files, recovery.
-- Configurable keybindings, grid/units, recent-files, autosave/backup &
-  crash-recovery, multi-game project switching (game-install config done ✅).
+- ✅ Recent files (File ▸ Recent Files, persisted in settings), autosave on a
+  timer into `<projectdir>\autosave` (the original's SaveTimer), numbered
+  backup copies (`backup\<level>_NN.jkl`, 100 slots), and a crash-recovery
+  prompt for the newest autosave on startup.
+- ⬜ Configurable keybindings, grid/units options, episode editor.
 
 ### P12 — Extensibility (architectural redesign) ✅
 The original plugin host is **Windows COM + native DLLs** (`SED_COM`,

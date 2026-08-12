@@ -107,8 +107,8 @@ WAVE 1:
   Q1 FindDialogs ✅ DONE  U4 CogEditor 🟡 partial
 
 WAVE 2:
-  F2 SaveAndTest (needs F1)    I1 DfImport      I2 ThreeDoExport
-  X1 UxParity
+  F2 SaveAndTest ✅ DONE     I1 DfImport ✅ DONE   I2 ThreeDoExport ✅ DONE
+  X1 UxParity ✅ DONE (recent files, autosave, backup, recovery)
 
 WAVE 3:
   P1 PluginModel ✅ DONE
@@ -257,7 +257,10 @@ sector-level half. Covered by `CleaveSectorTests` and `ConnectSectorsTests`.
 | Task | Deps | Summary |
 |------|------|---------|
 | F1 Save JKL+GOB | ✅ DONE | **File ▸ Save as GOB…** writes `jkl\<name>.jkl` into a GOB v2 archive |
-| F2 Save and test | F1 | Launch the game with the level (macOS: user-configured Wine/CrossOver command) |
+| F2 Save and test | F1 | **File ▸ Save GOB and Test…** writes `Test_<level>.gob` into the project dir (configured in **Game ▸ Test Setup…**, default `~/Documents/SED`), then launches: on Windows the original's generated `Test_<level>.bat` (`jk.exe -devmode -dispstats -debug log -displayconfig -path <projectdir>`); elsewhere the user's Wine/CrossOver command template with `{project}` `{gob}` `{game}` `{gameexe}` `{levelname}` placeholders |
+| I1 DF import | ✅ DONE | `Sed.Formats.Df.DfLevelImporter` ports `DF_IMPORT.INC` (`.lev` + `.O`): wall cycles, ear-clip triangulation + polygon merging, BOT/TOP/MID wall splitting, reversed-vertex adjoin matching, ambient light, `df2jk.lst` logic conversion, `Layer%d` naming. **Tools ▸ Import Dark Forces Level…** (`DfImportWindow`) with scale + texture options. Covered by `DfImportTests` |
+| I2 3DO export + ASC import | ✅ DONE | `ThreeDoWriter` (faithful `T3DO.SaveToFile`: sections, RADIUS, sorted TX-vertex dedup, averaged normals, hierarchy lines) + `ThreeDoExport` (the original's "Export Sector as 3DO": one mesh per layer, position-dedup'd vertices, adjoined surfaces skipped). **Tools ▸ Export Sector as 3DO…**. `AscImporter` ports `ASC_IMPORT.INC` (one sector per Tri-mesh; accepts both the count-bearing and standard 3DS layouts). **Tools ▸ Import 3D Studio ASC…**. Covered by `ThreeDoAndAscTests` |
+| X1 UX parity | 🟡 partial | **Recent files** (File ▸ Recent Files, persisted), **autosave** on a timer into `<projectdir>\autosave` (the original's SaveTimer), **backup copies** (`backup\<level>_NN.jkl`, 100 slots), and a **crash-recovery prompt** for the newest autosave on startup. Remaining: configurable keybindings, grid/units options, episode editor |
 | I1 DF import | none | `U_DFI.PAS` / `DF_IMPORT.INC` |
 | I2 3DO export | none | Export a sector as `.3do`; ASC/LEV import |
 | I3 3DO tooling | none | Hierarchy viewer, standalone preview (`U_3DOS`, `U_3DOFORM`, `U_3DOPREV`) |

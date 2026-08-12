@@ -45,12 +45,15 @@ public class MainWindow : Window
     private Sed.Formats.ThreeDo.ModelLibrary? _modelLibrary;
     private JklDocument? _currentDoc;     // for saving the currently loaded level
     private Level? _currentLevel;         // the model the views are editing
+    private string _levelName = "level";  // current level's file name (for Save and Test)
     private List<GobEntry> _levels = new();
     private ConsistencyWindow? _consistencyWindow;
     private FindWindow? _findWindow;
     private HeaderEditorWindow? _headerWindow;
     private TemplateEditorWindow? _templateWindow;
     private CogEditorWindow? _cogWindow;
+    private MenuItem? _recentMenu;
+    private Avalonia.Threading.DispatcherTimer? _autosaveTimer;
     private Sed.Formats.Cogs.CogScriptLibrary? _cogScripts;
     private AssetCatalog? _assetCatalog;
     private readonly PluginHost _plugins = new();
@@ -168,6 +171,8 @@ public class MainWindow : Window
         Content = root;
 
         TryAutoOpenConfiguredGame();
+        StartAutosave();
+        PromptForAutosaveRecovery();
     }
 
     // ---- game install flow ----
@@ -255,8 +260,13 @@ public class MainWindow : Window
         });
         var file = files.FirstOrDefault();
         if (file is null) return;
-        var path = file.Path.LocalPath;
+        OpenPath(file.Path.LocalPath, file.Name);
+    }
 
+    /// <summary>Opens a loose .jkl/.gob (the shared path behind File ▸ Open and the recent list).</summary>
+    private void OpenPath(string path, string? displayName)
+    {
+        displayName ??= Path.GetFileName(path);
         try
         {
             ClearSession();
@@ -271,12 +281,15 @@ public class MainWindow : Window
             else
             {
                 _currentDoc = JklParser.ParseDocument(File.ReadAllText(path));
-                LoadLevel(_currentDoc.Level, file.Name);
+                LoadLevel(_currentDoc.Level, displayName);
             }
+            _settings.AddRecent(path);
+            RebuildRecentMenu();
+            _status.Text = $"Opened {displayName}";
         }
         catch (Exception ex)
         {
-            _status.Text = $"Failed to open {file.Name}: {ex.Message}";
+            _status.Text = $"Failed to open {displayName}: {ex.Message}";
         }
     }
 
@@ -348,6 +361,7 @@ public class MainWindow : Window
         }
 
         _currentLevel = level;
+        _levelName = Path.GetFileNameWithoutExtension(name);
         _inspector.Context = new InspectorContext(this, level, Assets());
         _view.Layers.ShowAll();      // a new level starts fully visible
         _view.Materials = _currentDoc?.Materials ?? new List<string>();
@@ -501,6 +515,216 @@ public class MainWindow : Window
         }
     }
 
+    /// <summary>
+    /// Save GOB and test — the original's "Save JKL, GOB, and Test". Writes the
+    /// level as a single-entry GOB into the project directory, then launches the
+    /// game. On Windows this is the original's generated test batch; elsewhere it
+    /// is the user-configured launch command (Game ▸ Test Setup…), which is how a
+    /// Wine/CrossOver install gets pointed at the saved level.
+    /// </summary>
+    private async void SaveAndTest()
+    {
+        if (_currentDoc is null || _currentLevel is null)
+        {
+            _status.Text = "Open a level first, then save and test.";
+            return;
+        }
+
+        var game = _install?.Game ?? ProjectType.JediKnight;
+        var gameDir = _settings.DirFor(game);
+        if (string.IsNullOrEmpty(gameDir))
+        {
+            _status.Text = "Configure a game folder first (Game ▸ Set Folder), then save and test.";
+            return;
+        }
+
+        if (!await Dialogs.Confirm(this, "Save and test",
+                "You're about to test your level. Proceed?"))
+            return;
+
+        try
+        {
+            var projectDir = _settings.ResolvedProjectDir();
+            Directory.CreateDirectory(projectDir);
+
+            var levelName = SanitizeName(_levelName);
+            var gobPath = Path.Combine(projectDir, $"Test_{levelName}.gob");
+
+            // The engine finds levels by archive path, so the entry must be under
+            // jkl\ with a .jkl extension regardless of the archive's name.
+            var jkl = JklWriter.Build(_currentDoc);
+            var bytes = System.Text.Encoding.ASCII.GetBytes(jkl);
+            GobWriter.Build(gobPath, new[] { ($"jkl\\{levelName}.jkl", bytes) });
+
+            LaunchTest(game, gameDir, projectDir, gobPath, levelName);
+            _status.Text = $"Saved Test_{levelName}.gob → {Path.GetFileName(gobPath)}";
+        }
+        catch (Exception ex)
+        {
+            _status.Text = $"Save-and-test failed: {ex.Message}";
+        }
+    }
+
+    private void LaunchTest(ProjectType game, string gameDir, string projectDir, string gobPath, string levelName)
+    {
+        var command = _settings.BuildTestCommand(game, projectDir, gobPath, levelName);
+        if (!string.IsNullOrWhiteSpace(command))
+        {
+            // User-configured template: run through the platform shell so Wine
+            // invocations and quoted paths behave as written.
+            var psi = OperatingSystem.IsWindows()
+                ? new System.Diagnostics.ProcessStartInfo("cmd.exe")
+                : new System.Diagnostics.ProcessStartInfo("/bin/sh");
+            psi.ArgumentList.Add("/c");
+            psi.ArgumentList.Add(command);
+            System.Diagnostics.Process.Start(psi);
+            return;
+        }
+
+        if (OperatingSystem.IsWindows())
+        {
+            // Faithful port of the original: a batch that runs the game from its
+            // install dir with -path pointing at the project dir.
+            var bat = Path.Combine(projectDir, $"Test_{levelName}.bat");
+            if (!File.Exists(bat))
+            {
+                File.WriteAllText(bat, string.Join(Environment.NewLine,
+                    "@echo off",
+                    $"cd /d \"{gameDir}\"",
+                    $"{AppSettings.GameExeName(game)} -devmode -dispstats -debug log " +
+                    $"-displayconfig -path \"{projectDir}\""));
+            }
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(bat) { UseShellExecute = true });
+            return;
+        }
+
+        _status.Text = "Saved the test GOB — configure a launch command (Game ▸ Test Setup…) to start the game.";
+    }
+
+    private static string SanitizeName(string name)
+    {
+        foreach (var c in Path.GetInvalidFileNameChars())
+            name = name.Replace(c, '_');
+        return name.Length == 0 ? "level" : name;
+    }
+
+    // ---- autosave / backup / recovery (the original's SaveTimer + backup copies) ----
+
+    private void StartAutosave()
+    {
+        _autosaveTimer = new Avalonia.Threading.DispatcherTimer
+        {
+            Interval = TimeSpan.FromMinutes(Math.Max(1, _settings.AutoSaveIntervalMinutes)),
+        };
+        _autosaveTimer.Tick += (_, _) => AutosaveNow();
+        _autosaveTimer.IsEnabled = _settings.AutoSave;
+    }
+
+    private void AutosaveNow()
+    {
+        if (_currentDoc is null) return;
+        try
+        {
+            var dir = Path.Combine(_settings.ResolvedProjectDir(), "autosave");
+            Directory.CreateDirectory(dir);
+            var path = Path.Combine(dir, $"{SanitizeName(_levelName)}.jkl");
+            File.WriteAllText(path, JklWriter.Build(_currentDoc));
+            _status.Text = $"Autosaved → {Path.GetFileName(path)}";
+        }
+        catch (Exception ex)
+        {
+            _status.Text = $"Autosave failed: {ex.Message}";
+        }
+    }
+
+    /// <summary>Numbered backup copy into the project dir's backup folder (the original's 100 slots).</summary>
+    private void MakeBackupCopy()
+    {
+        if (_currentDoc is null)
+        {
+            _status.Text = "Open a level first, then make a backup.";
+            return;
+        }
+
+        try
+        {
+            var dir = Path.Combine(_settings.ResolvedProjectDir(), "backup");
+            Directory.CreateDirectory(dir);
+            string? path = null;
+            for (int n = 0; n < 100; n++)
+            {
+                var candidate = Path.Combine(dir, $"{SanitizeName(_levelName)}_{n:00}.jkl");
+                if (!File.Exists(candidate)) { path = candidate; break; }
+            }
+            if (path is null)
+            {
+                _status.Text = "You have 100 backup copies! Remove some.";
+                return;
+            }
+            File.WriteAllText(path, JklWriter.Build(_currentDoc));
+            _status.Text = $"Backup → {Path.GetFileName(path)}";
+        }
+        catch (Exception ex)
+        {
+            _status.Text = $"Backup failed: {ex.Message}";
+        }
+    }
+
+    /// <summary>Offers the newest autosaved level once the window is up (crash recovery).</summary>
+    private void PromptForAutosaveRecovery()
+    {
+        Opened += async (_, _) =>
+        {
+            var dir = Path.Combine(_settings.ResolvedProjectDir(), "autosave");
+            if (!Directory.Exists(dir)) return;
+            var newest = Directory.EnumerateFiles(dir, "*.jkl")
+                .OrderByDescending(f => File.GetLastWriteTimeUtc(f))
+                .FirstOrDefault();
+            if (newest is null) return;
+
+            if (await Dialogs.Confirm(this, "Recover autosave",
+                    $"An autosaved version of {Path.GetFileName(newest)} was found " +
+                    $"(saved {File.GetLastWriteTime(newest):g}). Recover it?"))
+                OpenPath(newest, $"{Path.GetFileName(newest)} (recovered)");
+        };
+    }
+
+    /// <summary>Rebuilds the File ▸ Recent Files submenu from the settings.</summary>
+    private void RebuildRecentMenu()
+    {
+        if (_recentMenu is null) return;
+        _recentMenu.Items.Clear();
+
+        var recent = _settings.RecentFiles.Where(File.Exists).ToList();
+        if (recent.Count == 0)
+        {
+            _recentMenu.Items.Add(new MenuItem { Header = "(none)", IsEnabled = false });
+            return;
+        }
+
+        foreach (var p in recent)
+        {
+            var item = new MenuItem { Header = Path.GetFileName(p), Icon = Glyph("\uE61E") };
+            var path = p;
+            item.Click += (_, _) => OpenPath(path, null);
+            _recentMenu.Items.Add(item);
+        }
+        _recentMenu.Items.Add(new Separator());
+        var clear = new MenuItem { Header = "Clear Recent Files" };
+        clear.Click += (_, _) =>
+        {
+            _settings.RecentFiles.Clear();
+            _settings.Save();
+            RebuildRecentMenu();
+        };
+        _recentMenu.Items.Add(clear);
+    }
+
+    private void ShowTestSetup()
+    {
+        new TestSetupWindow(_settings).ShowDialog(this);
+    }
+
     private void ClearSession()
     {
         _currentDoc = null;
@@ -634,6 +858,14 @@ public class MainWindow : Window
         file.Items.Add(saveAs);
         file.Items.Add(Item("Save as _GOB…", null, SaveGob));
         file.Items.Add(new Separator());
+        file.Items.Add(Item("Save GOB and _Test…", null, SaveAndTest));
+        file.Items.Add(new Separator());
+        file.Items.Add(Item("Make a _Backup Copy…", null, MakeBackupCopy));
+        file.Items.Add(new Separator());
+        _recentMenu = new MenuItem { Header = "Recent _Files" };
+        RebuildRecentMenu();
+        file.Items.Add(_recentMenu);
+        file.Items.Add(new Separator());
         file.Items.Add(exit);
 
         var undo = new MenuItem { Header = "_Undo", InputGesture = new KeyGesture(Key.Z, KeyModifiers.Control) };
@@ -676,6 +908,8 @@ public class MainWindow : Window
             item.Click += (_, _) => SetGameFolder(kind);
             game.Items.Add(item);
         }
+        game.Items.Add(new Separator());
+        game.Items.Add(Item("Test _Setup…", null, ShowTestSetup));
 
         var view = new MenuItem { Header = "_View" };
         var brightness = new MenuItem { Header = "Cycle _Brightness", InputGesture = new KeyGesture(Key.B), Icon = Glyph("\uE18C") };
@@ -841,7 +1075,139 @@ public class MainWindow : Window
         tools.Items.Add(Item("Level _Header\u2026", null, ShowHeaderEditor));
         tools.Items.Add(Item("_Find\u2026", new KeyGesture(Key.F, KeyModifiers.Control | KeyModifiers.Shift), ShowFind));
         tools.Items.Add(Item("_Check Consistency\u2026", new KeyGesture(Key.F8), ShowConsistency));
+        tools.Items.Add(new Separator());
+        tools.Items.Add(Item("Import _Dark Forces Level…", null, ImportDfLevel));
+        tools.Items.Add(Item("Import _3D Studio ASC…", null, ImportAsc));
+        tools.Items.Add(Item("E_xport Sector as 3DO…", null, ExportSectorAs3Do));
         return tools;
+    }
+
+    /// <summary>
+    /// Imports a Dark Forces .lev (Tools ▸ Import Dark Forces Level…), replacing
+    /// the current level. The sibling .O file and the game's df2jk.lst table are
+    /// picked up automatically.
+    /// </summary>
+    private async void ImportDfLevel()
+    {
+        var dialog = new DfImportWindow(_settings);
+        await dialog.ShowDialog(this);
+        if (dialog.LevPath is null) return;
+
+        try
+        {
+            var gameDir = _settings.DirFor(_install?.Game ?? ProjectType.JediKnight) ?? string.Empty;
+            var table = gameDir.Length > 0 ? Sed.Formats.Df.DfLevelImporter.LoadLogicTable(gameDir) : null;
+
+            var options = new Sed.Formats.Df.DfImportOptions
+            {
+                ScaleFactor = dialog.ScaleFactor,
+                KeepTextureNames = dialog.KeepTextureNames,
+                LogicTable = table,
+            };
+
+            var (level, warnings) = Sed.Formats.Df.DfLevelImporter.ImportFile(dialog.LevPath, options);
+
+            // Reuse the session's archives (materials/models still resolve); the
+            // document is a fresh one so the material panel reflects the import.
+            var doc = new JklDocument(level);
+            foreach (var m in level.Sectors.SelectMany(s => s.Surfaces)
+                         .Select(s => s.Material)
+                         .Where(m => m.Length > 0)
+                         .Distinct(StringComparer.OrdinalIgnoreCase))
+                doc.Materials.Add(m);
+
+            _currentDoc = doc;
+            LoadLevel(level, Path.GetFileName(dialog.LevPath));
+
+            _status.Text = $"Imported {Path.GetFileName(dialog.LevPath)} — {level.Sectors.Count} sectors, " +
+                           $"{level.Things.Count} things" +
+                           (warnings.Count > 0 ? $"; {warnings.Count} warning(s)" : "");
+        }
+        catch (Exception ex)
+        {
+            _status.Text = $"DF import failed: {ex.Message}";
+        }
+    }
+
+    /// <summary>Imports a 3D Studio ASC file as level geometry (one sector per Tri-mesh).</summary>
+    private async void ImportAsc()
+    {
+        var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+        {
+            Title = "Open 3D Studio ASCII file",
+            AllowMultiple = false,
+            FileTypeFilter = new[]
+            {
+                new FilePickerFileType("3D Studio ASCII (*.asc)") { Patterns = new[] { "*.asc" } },
+                FilePickerFileTypes.All,
+            },
+        });
+        var file = files.FirstOrDefault();
+        if (file is null) return;
+
+        try
+        {
+            var level = Sed.Formats.Asc.AscImporter.Import(File.ReadAllText(file.Path.LocalPath));
+            var doc = new JklDocument(level);
+            _currentDoc = doc;
+            LoadLevel(level, file.Name);
+
+            _status.Text = $"Imported {file.Name} — {level.Sectors.Count} sector(s), " +
+                           $"{level.Things.Count} thing(s)";
+        }
+        catch (Exception ex)
+        {
+            _status.Text = $"ASC import failed: {ex.Message}";
+        }
+    }
+
+    /// <summary>
+    /// Exports the selected sectors (or the active one) as a 3DO model — the
+    /// original's "Export Sector as 3DO", grouped into one mesh per layer.
+    /// </summary>
+    private async void ExportSectorAs3Do()
+    {
+        if (_currentLevel is not { } level)
+        {
+            _status.Text = "Open a level first, then export a sector.";
+            return;
+        }
+
+        var sectors = _view.Selection.Sectors.Count > 0
+            ? _view.Selection.Sectors.ToList()
+            : _view.ActiveSector is { } active ? new List<Sector> { active } : null;
+        if (sectors is null || sectors.Count == 0)
+        {
+            _status.Text = "Select a sector first (or enter Sector mode), then export.";
+            return;
+        }
+
+        var file = await StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
+        {
+            Title = "Export sector as 3DO",
+            DefaultExtension = "3do",
+            SuggestedFileName = "sector.3do",
+            FileTypeChoices = new[]
+            {
+                new FilePickerFileType("Sith engine model (*.3do)") { Patterns = new[] { "*.3do" } },
+            },
+        });
+        if (file is null) return;
+
+        try
+        {
+            var model = Sed.Formats.ThreeDo.ThreeDoExport.BuildModel(level, sectors,
+                i => (uint)i < (uint)level.Layers.Count ? level.Layers[i] : $"Layer{i}");
+            Sed.Formats.ThreeDo.ThreeDoWriter.Save(model, file.Path.LocalPath);
+
+            int faces = model.Meshes.Sum(m => m.Faces.Count);
+            _status.Text = $"Exported {sectors.Count} sector(s), {model.Meshes.Count} mesh(es), " +
+                           $"{faces} face(s) → {file.Name}";
+        }
+        catch (Exception ex)
+        {
+            _status.Text = $"3DO export failed: {ex.Message}";
+        }
     }
 
     /// <summary>Opens the level-header editor for the loaded level.</summary>

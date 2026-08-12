@@ -29,4 +29,11 @@ public sealed class JklDocument
     public List<string> Materials { get; } = new();
 
     public JklDocument(string[] sourceLines) => SourceLines = sourceLines;
+
+    /// <summary>
+    /// A document built from a model rather than parsed text (imports). Saving
+    /// regenerates the GEORESOURCE/SECTORS/THINGS sections from the model and
+    /// appends the rest, since there is no source text to preserve.
+    /// </summary>
+    public JklDocument(Level level) : this(Array.Empty<string>()) => Level = level;
 }

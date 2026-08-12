@@ -6,6 +6,14 @@ namespace Sed.Formats.ThreeDo;
 public sealed class Face3do
 {
     public int Material = -1;
+
+    /// <summary>Engine per-face fields, preserved verbatim on write (surfflags, geo, light, tex, extralight).</summary>
+    public long FaceFlags;
+    public int Geo;
+    public int Light;
+    public int Tex;
+    public float ExtraLight;
+
     public List<int> VertexIndices { get; } = new();
     public List<int> UvIndices { get; } = new();
 }
@@ -34,6 +42,7 @@ public sealed class HierarchyNode
 /// </summary>
 public sealed class ThreeDoModel
 {
+    public string Name { get; set; } = string.Empty;
     public double Version { get; set; }
     public Vec3 InsertOffset { get; set; }
     public List<string> Materials { get; } = new();

@@ -55,3 +55,6 @@ res/SED.res
 # vs
 *.vs
 /build
+
+# ad-hoc scratch probes (not part of the solution)
+dotnet/scratch/
