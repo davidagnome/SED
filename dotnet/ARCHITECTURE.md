@@ -643,10 +643,17 @@ Mirror `Gob Project`, `Save JKL and Test`, `FILEOPERATIONS`.
   `ThreeDoExport`, Tools ▸ Export Sector as 3DO…), and **ASC import**
   (`AscImporter`, Tools ▸ Import 3D Studio ASC…).
 
-### P10 — 3DO model tooling ⬜
+### P10 — 3DO model tooling 🟡
 Mirror `U_3DOS`/`U_3DOFORM`/`U_3doprev` (we render 3DO ✅, don't edit).
-- 3DO hierarchy viewer/editor; standalone 3DO preview window; export sector→3DO ✅
-  (Tools ▸ Export Sector as 3DO…).
+- ✅ **KEY animation parser** (`Sed.Formats.Keyframe.KeyFile`, faithful to
+  `PJKEY_IO.INC`/`U_PJKEY.PAS`: per-node keyframe entries with rest pose +
+  per-frame deltas, `GetFrame` linear interpolation).
+- ✅ **3DO Model Viewer** (Tools ▸ 3DO Model Viewer…): hierarchy tree with
+  mesh/parent/offset/pyr, per-mesh stats, KEY loading and a frame scrubber that
+  shows each node's interpolated pose per frame.
+- ✅ Export sector→3DO (Tools ▸ Export Sector as 3DO…).
+- ⬜ Standalone rendered 3DO preview window; KEY playback on the 3DO in the
+  viewport (the cutscene helper's preview).
 
 ### P11 — Editor UX parity 🟡
 Mirror `U_OPTIONS`, recent files, recovery.

@@ -293,49 +293,53 @@ public sealed class VulkanView : Control
 
     // ---- keyboard fly movement ----
 
+    /// <summary>
+    /// The configurable command-key table (menu commands). When set, the menu
+    /// chords below resolve through it so remapped shortcuts behave identically
+    /// whether the view or the window has focus.
+    /// </summary>
+    public CommandKeys? Bindings { get; set; }
+
     protected override void OnKeyDown(KeyEventArgs e)
     {
-        if (e.KeyModifiers.HasFlag(KeyModifiers.Control))
+        var mods = e.KeyModifiers;
+
+        // Configurable menu commands — exact gesture match, handled before the
+        // hardcoded chords below.
+        if (Bindings is { } kb)
         {
-            bool shift = e.KeyModifiers.HasFlag(KeyModifiers.Shift);
+            bool shift = mods.HasFlag(KeyModifiers.Shift);
 
-            if (e.Key == Key.Z && shift) { History.Redo(); e.Handled = true; return; }
-            if (e.Key == Key.Z) { History.Undo(); e.Handled = true; return; }
-            if (e.Key == Key.Y) { History.Redo(); e.Handled = true; return; }
+            if (kb.Pressed(CommandKeys.Redo, e.Key, mods)) { History.Redo(); e.Handled = true; return; }
+            if (kb.Pressed(CommandKeys.Undo, e.Key, mods)) { History.Undo(); e.Handled = true; return; }
+            if (kb.Pressed(CommandKeys.Copy, e.Key, mods)) { CopySelection(); e.Handled = true; return; }
+            if (kb.Pressed(CommandKeys.Paste, e.Key, mods)) { PasteClipboard(); e.Handled = true; return; }
+            if (kb.Pressed(CommandKeys.Duplicate, e.Key, mods)) { DuplicateSelection(); e.Handled = true; return; }
+            if (kb.Pressed(CommandKeys.ConnectSectors, e.Key, mods)) { ConnectSelectedSectors(); e.Handled = true; return; }
+            if (kb.Pressed(CommandKeys.BridgeSurfaces, e.Key, mods)) { BridgeSelectedSurfaces(); e.Handled = true; return; }
+            if (kb.Pressed(CommandKeys.Extrude, e.Key, mods)) { ExtrudeSelectedSurface(1.0); e.Handled = true; return; }
+            if (kb.Pressed(CommandKeys.ExtrudeInward, e.Key, mods)) { ExtrudeSelectedSurface(-1.0); e.Handled = true; return; }
+            if (kb.Pressed(CommandKeys.FlipSurface, e.Key, mods)) { FlipSelectedSurface(); e.Handled = true; return; }
+            if (kb.Pressed(CommandKeys.CleaveSurface, e.Key, mods)) { CleaveSelectedSurface(); e.Handled = true; return; }
+            if (kb.Pressed(CommandKeys.MakeAdjoin, e.Key, mods)) { MakeAdjoinStep(); e.Handled = true; return; }
+            if (kb.Pressed(CommandKeys.RemoveAdjoin, e.Key, mods)) { RemoveSelectedAdjoin(); e.Handled = true; return; }
+            if (kb.Pressed(CommandKeys.RotateTextureCw, e.Key, mods)) { RotateSelectedTexture(15); e.Handled = true; return; }
+            if (kb.Pressed(CommandKeys.RotateTextureCcw, e.Key, mods)) { RotateSelectedTexture(-15); e.Handled = true; return; }
+            if (kb.Pressed(CommandKeys.AlignTextureNeighbour, e.Key, mods)) { AlignSelectedTextureToNeighbour(); e.Handled = true; return; }
+            if (kb.Pressed(CommandKeys.AutoFitTexture, e.Key, mods)) { AutoTextureSelected(); e.Handled = true; return; }
+            if (kb.Pressed(CommandKeys.ScaleTextureUp, e.Key, mods)) { ScaleSelectedTexture(1.0 / 0.9); e.Handled = true; return; }
+            if (kb.Pressed(CommandKeys.ScaleTextureDown, e.Key, mods)) { ScaleSelectedTexture(0.9); e.Handled = true; return; }
+            if (kb.Pressed(CommandKeys.CalculateLighting, e.Key, mods)) { CalculateLighting(); e.Handled = true; return; }
+            if (kb.Pressed(CommandKeys.CalculateLightingNoShadows, e.Key, mods)) { CalculateLighting(castShadows: false); e.Handled = true; return; }
+            if (kb.Pressed(CommandKeys.SelectAllInSector, e.Key, mods)) { SelectActiveSectorSurfaces(); e.Handled = true; return; }
+            if (kb.Pressed(CommandKeys.SelectNone, e.Key, mods)) { ClearSelection(); e.Handled = true; return; }
 
-            // Clipboard
-            if (e.Key == Key.C) { CopySelection(); e.Handled = true; return; }
-            if (e.Key == Key.V) { PasteClipboard(); e.Handled = true; return; }
-            if (e.Key == Key.D) { DuplicateSelection(); e.Handled = true; return; }
-
-            // Geometry ops
-            if (e.Key == Key.B && shift) { ConnectSelectedSectors(); e.Handled = true; return; }
-            if (e.Key == Key.B) { BridgeSelectedSurfaces(); e.Handled = true; return; }
-            if (e.Key == Key.E) { ExtrudeSelectedSurface(shift ? -1.0 : 1.0); e.Handled = true; return; }
-            if (e.Key == Key.F) { FlipSelectedSurface(); e.Handled = true; return; }
-            if (e.Key == Key.K) { CleaveSelectedSurface(); e.Handled = true; return; }
-            if (e.Key == Key.J)
-            {
-                if (shift) RemoveSelectedAdjoin(); else MakeAdjoinStep();
-                e.Handled = true;
-                return;
-            }
-
-            // Texture ops
-            if (e.Key == Key.R) { RotateSelectedTexture(shift ? -15 : 15); e.Handled = true; return; }
-            if (e.Key == Key.T && shift) { AlignSelectedTextureToNeighbour(); e.Handled = true; return; }
-            if (e.Key == Key.T) { AutoTextureSelected(); e.Handled = true; return; }
-            if (e.Key == Key.OemPlus) { ScaleSelectedTexture(1.0 / 0.9); e.Handled = true; return; }
-            if (e.Key == Key.OemMinus) { ScaleSelectedTexture(0.9); e.Handled = true; return; }
-
-            const double texStep = 0.125;   // one eighth of the material, per press
-            switch (e.Key)
-            {
-                case Key.Left: ShiftSelectedTexture(-texStep, 0); e.Handled = true; return;
-                case Key.Right: ShiftSelectedTexture(texStep, 0); e.Handled = true; return;
-                case Key.Up: ShiftSelectedTexture(0, -texStep); e.Handled = true; return;
-                case Key.Down: ShiftSelectedTexture(0, texStep); e.Handled = true; return;
-            }
+            // Texture shift arrows (Ctrl+arrows).
+            const double texStep = 0.125;
+            if (kb.Pressed(CommandKeys.ShiftTextureLeft, e.Key, mods)) { ShiftSelectedTexture(-texStep, 0); e.Handled = true; return; }
+            if (kb.Pressed(CommandKeys.ShiftTextureRight, e.Key, mods)) { ShiftSelectedTexture(texStep, 0); e.Handled = true; return; }
+            if (kb.Pressed(CommandKeys.ShiftTextureUp, e.Key, mods)) { ShiftSelectedTexture(0, -texStep); e.Handled = true; return; }
+            if (kb.Pressed(CommandKeys.ShiftTextureDown, e.Key, mods)) { ShiftSelectedTexture(0, texStep); e.Handled = true; return; }
         }
 
         // Esc backs out of a pending adjoin first, then clears the selection.

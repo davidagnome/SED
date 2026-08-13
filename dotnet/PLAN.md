@@ -200,10 +200,12 @@ Asset pickers are wired in (milestone 52).
   the script symbol they feed. Covered by `CogScriptTests` and `Sed.OpsProbe`.
 - ✅ COG **generator** — `MasterCogGenerator` + `CogGeneratorWindow`
   (Tools ▸ Generate Master COG).
-- ⬜ **Cutscene helper** (`U_CSCENE.PAS`) — it is a keyframe previewer: assign a
-  `.key` file and a time per thing, then play it back on the thing's 3DO model.
-  That needs a **KEY parser and 3DO skeletal animation**, neither of which exists.
-  It belongs with I3 (3DO tooling), not with the COG work.
+- 🟡 **Cutscene helper** (`U_CSCENE.PAS`) — the **KEY parser** now exists
+  (`Sed.Formats.Keyframe.KeyFile`: HEADER + per-node entries with rest pose +
+  per-frame deltas, `GetFrame` linear interpolation, faithful to
+  `PJKEY_IO.INC`/`U_PJKEY.PAS`), and the 3DO viewer's **frame scrubber**
+  shows each node's interpolated pose per frame. What's still missing is
+  playing the pose back on the rendered 3DO in a preview viewport.
 - ✅ Asset pickers: asset symbols browse the archives, and `thing`/`sector`/
   `surface` symbols browse the level with Find-style labels (milestone 52).
 
@@ -218,10 +220,11 @@ colormap/sound or flag mask; click a result to select and frame it
 (`VulkanView.JumpTo`); "Select all matches" feeds every hit into the selection.
 Covered by `LevelQueryTests` and both probes.
 
-**Remaining**: the original offers a per-field query builder (a comparison
-operator per field — material, adjoin sector/surface, each flag word). The
-current dialog is free text plus one flag mask; extend `FindQuery` if the
-finer-grained form is wanted.
+The original's per-field query builder is now the **Fields** tab: one row per
+field (material, adjoin sector/surface, each flag word, geo/light/tex, name,
+template, position, volume, layer name…) with the original's operator set
+(`=`, `<>`, `>`, `<`, SET / NOT SET bitmask, contains) — `FieldCriteria` +
+`FieldQueryTests`.
 
 ---
 
@@ -260,11 +263,9 @@ sector-level half. Covered by `CleaveSectorTests` and `ConnectSectorsTests`.
 | F2 Save and test | F1 | **File ▸ Save GOB and Test…** writes `Test_<level>.gob` into the project dir (configured in **Game ▸ Test Setup…**, default `~/Documents/SED`), then launches: on Windows the original's generated `Test_<level>.bat` (`jk.exe -devmode -dispstats -debug log -displayconfig -path <projectdir>`); elsewhere the user's Wine/CrossOver command template with `{project}` `{gob}` `{game}` `{gameexe}` `{levelname}` placeholders |
 | I1 DF import | ✅ DONE | `Sed.Formats.Df.DfLevelImporter` ports `DF_IMPORT.INC` (`.lev` + `.O`): wall cycles, ear-clip triangulation + polygon merging, BOT/TOP/MID wall splitting, reversed-vertex adjoin matching, ambient light, `df2jk.lst` logic conversion, `Layer%d` naming. **Tools ▸ Import Dark Forces Level…** (`DfImportWindow`) with scale + texture options. Covered by `DfImportTests` |
 | I2 3DO export + ASC import | ✅ DONE | `ThreeDoWriter` (faithful `T3DO.SaveToFile`: sections, RADIUS, sorted TX-vertex dedup, averaged normals, hierarchy lines) + `ThreeDoExport` (the original's "Export Sector as 3DO": one mesh per layer, position-dedup'd vertices, adjoined surfaces skipped). **Tools ▸ Export Sector as 3DO…**. `AscImporter` ports `ASC_IMPORT.INC` (one sector per Tri-mesh; accepts both the count-bearing and standard 3DS layouts). **Tools ▸ Import 3D Studio ASC…**. Covered by `ThreeDoAndAscTests` |
-| X1 UX parity | 🟡 partial | **Recent files** (File ▸ Recent Files, persisted), **autosave** on a timer into `<projectdir>\autosave` (the original's SaveTimer), **backup copies** (`backup\<level>_NN.jkl`, 100 slots), and a **crash-recovery prompt** for the newest autosave on startup. Remaining: configurable keybindings, grid/units options, episode editor |
-| I1 DF import | none | `U_DFI.PAS` / `DF_IMPORT.INC` |
-| I2 3DO export | none | Export a sector as `.3do`; ASC/LEV import |
-| I3 3DO tooling | none | Hierarchy viewer, standalone preview (`U_3DOS`, `U_3DOFORM`, `U_3DOPREV`) |
-| X1 UX parity | none | Configurable keybindings, recent files, autosave/backup, crash recovery (`U_OPTIONS.PAS`) |
+| X1 UX parity | 🟡 | **Recent files** (File ▸ Recent Files, persisted), **autosave** on a timer into `<projectdir>\autosave` (the original's SaveTimer), **backup copies** (`backup\<level>_NN.jkl`, 100 slots), a **crash-recovery prompt** for the newest autosave on startup, and **configurable keybindings** (`CommandKeys` + Tools ▸ Key Bindings… — every menu command remappable, semicolon-separated gesture lists, resolved by both the menus and the view's chord handling). Remaining: grid/units options |
+| I3 3DO tooling | 🟡 | **3DO Model Viewer** (Tools ▸ 3DO Model Viewer…): hierarchy tree (mesh/parent/offset/pyr), mesh stats, KEY file loading with a frame scrubber showing each node's interpolated pose (`KeyFile` parser ports `PJKEY_IO.INC`/`U_PJKEY`). Remaining: standalone rendered preview + KEY playback on the 3DO |
+| Episode editor | ✅ DONE | `EpisodeFile` + `CogStrings` (episode.jk: name, game type, LEVEL/DECIDE sequences with line/cd/level/gotoA-B/force powers; cogstrings.uni level names + mission text). **Tools ▸ Episode Editor…** writes both into the project dir. Covered by `EpisodeTests` |
 | P1 Plugin model | ✅ DONE | `Sed.Plugins` contract + `PluginHost`; Plugins menu. Covered by `PluginHostTests` |
 
 ---

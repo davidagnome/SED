@@ -24,6 +24,7 @@ namespace Sed.App;
 public class MainWindow : Window
 {
     private readonly AppSettings _settings = AppSettings.Load();
+    private readonly CommandKeys _bindings;
     private readonly TextBlock _status;
     private readonly VulkanView _view;
     private readonly MapView _mapView = new();
@@ -60,6 +61,7 @@ public class MainWindow : Window
 
     public MainWindow()
     {
+        _bindings = new CommandKeys(_settings);
         Title = "SED — Sith Engine Editor (.NET / Vulkan)";
         Width = 1100;
         Height = 720;
@@ -73,6 +75,7 @@ public class MainWindow : Window
         _view = new VulkanView(SampleScene.CreateCube())
         {
             SelectionChanged = desc => _status.Text = desc ?? "Nothing selected",
+            Bindings = _bindings,
         };
 
         _inspector.SetHistory(_view.History);
@@ -856,11 +859,11 @@ public class MainWindow : Window
         var saveAs = new MenuItem { Header = "Save _As…", InputGesture = new KeyGesture(Key.S, KeyModifiers.Control), Icon = Glyph("\uE236") };
         saveAs.Click += (_, _) => SaveAs();
         file.Items.Add(saveAs);
-        file.Items.Add(Item("Save as _GOB…", null, SaveGob));
+        file.Items.Add(Item(null, "Save as _GOB…", null, SaveGob));
         file.Items.Add(new Separator());
-        file.Items.Add(Item("Save GOB and _Test…", null, SaveAndTest));
+        file.Items.Add(Item(null, "Save GOB and _Test…", null, SaveAndTest));
         file.Items.Add(new Separator());
-        file.Items.Add(Item("Make a _Backup Copy…", null, MakeBackupCopy));
+        file.Items.Add(Item(null, "Make a _Backup Copy…", null, MakeBackupCopy));
         file.Items.Add(new Separator());
         _recentMenu = new MenuItem { Header = "Recent _Files" };
         RebuildRecentMenu();
@@ -868,10 +871,14 @@ public class MainWindow : Window
         file.Items.Add(new Separator());
         file.Items.Add(exit);
 
-        var undo = new MenuItem { Header = "_Undo", InputGesture = new KeyGesture(Key.Z, KeyModifiers.Control) };
+        var undo = new MenuItem { Header = "_Undo", InputGesture = _bindings.Primary(CommandKeys.Undo) };
         undo.Click += (_, _) => _view.History.Undo();
-        var redo = new MenuItem { Header = "_Redo", InputGesture = new KeyGesture(Key.Y, KeyModifiers.Control) };
+        var redo = new MenuItem { Header = "_Redo", InputGesture = _bindings.Primary(CommandKeys.Redo) };
         redo.Click += (_, _) => _view.History.Redo();
+        foreach (var g in _bindings.Gestures(CommandKeys.Undo))
+            KeyBindings.Add(new KeyBinding { Gesture = g, Command = new RelayCommand(() => _view.History.Undo()) });
+        foreach (var g in _bindings.Gestures(CommandKeys.Redo))
+            KeyBindings.Add(new KeyBinding { Gesture = g, Command = new RelayCommand(() => _view.History.Redo()) });
         var newSector = new MenuItem { Header = "_New Box Sector", InputGesture = new KeyGesture(Key.N) };
         newSector.Click += (_, _) => _view.CreateSector();
         var delSector = new MenuItem { Header = "Delete Se_ctor" };
@@ -881,13 +888,13 @@ public class MainWindow : Window
         edit.Items.Add(undo);
         edit.Items.Add(redo);
         edit.Items.Add(new Separator());
-        edit.Items.Add(Item("_Copy", new KeyGesture(Key.C, KeyModifiers.Control), () => _view.CopySelection()));
-        edit.Items.Add(Item("_Paste", new KeyGesture(Key.V, KeyModifiers.Control), () => _view.PasteClipboard()));
-        edit.Items.Add(Item("_Duplicate", new KeyGesture(Key.D, KeyModifiers.Control), () => _view.DuplicateSelection()));
+        edit.Items.Add(Item(CommandKeys.Copy, "_Copy", new KeyGesture(Key.C, KeyModifiers.Control), () => _view.CopySelection()));
+        edit.Items.Add(Item(CommandKeys.Paste, "_Paste", new KeyGesture(Key.V, KeyModifiers.Control), () => _view.PasteClipboard()));
+        edit.Items.Add(Item(CommandKeys.Duplicate, "_Duplicate", new KeyGesture(Key.D, KeyModifiers.Control), () => _view.DuplicateSelection()));
         edit.Items.Add(new Separator());
-        edit.Items.Add(Item("Select All in _Sector", new KeyGesture(Key.A, KeyModifiers.Control),
+        edit.Items.Add(Item(CommandKeys.SelectAllInSector, "Select All in _Sector", new KeyGesture(Key.A, KeyModifiers.Control),
             () => _view.SelectActiveSectorSurfaces()));
-        edit.Items.Add(Item("Select _None", new KeyGesture(Key.Escape), () => _view.ClearSelection()));
+        edit.Items.Add(Item(CommandKeys.SelectNone, "Select _None", new KeyGesture(Key.Escape), () => _view.ClearSelection()));
         edit.Items.Add(new Separator());
         edit.Items.Add(newSector);
         edit.Items.Add(delSector);
@@ -909,7 +916,7 @@ public class MainWindow : Window
             game.Items.Add(item);
         }
         game.Items.Add(new Separator());
-        game.Items.Add(Item("Test _Setup…", null, ShowTestSetup));
+        game.Items.Add(Item(null, "Test _Setup…", null, ShowTestSetup));
 
         var view = new MenuItem { Header = "_View" };
         var brightness = new MenuItem { Header = "Cycle _Brightness", InputGesture = new KeyGesture(Key.B), Icon = Glyph("\uE18C") };
@@ -1010,23 +1017,23 @@ public class MainWindow : Window
     {
         var geometry = new MenuItem { Header = "_Geometry" };
 
-        geometry.Items.Add(Item("_Extrude Surface", new KeyGesture(Key.E, KeyModifiers.Control),
+        geometry.Items.Add(Item(CommandKeys.Extrude, "_Extrude Surface", new KeyGesture(Key.E, KeyModifiers.Control),
             () => _view.ExtrudeSelectedSurface()));
-        geometry.Items.Add(Item("Extrude _Inward", new KeyGesture(Key.E, KeyModifiers.Control | KeyModifiers.Shift),
+        geometry.Items.Add(Item(CommandKeys.ExtrudeInward, "Extrude _Inward", new KeyGesture(Key.E, KeyModifiers.Control | KeyModifiers.Shift),
             () => _view.ExtrudeSelectedSurface(-1.0)));
         geometry.Items.Add(new Separator());
-        geometry.Items.Add(Item("_Flip Surface", new KeyGesture(Key.F, KeyModifiers.Control),
+        geometry.Items.Add(Item(CommandKeys.FlipSurface, "_Flip Surface", new KeyGesture(Key.F, KeyModifiers.Control),
             () => _view.FlipSelectedSurface()));
-        geometry.Items.Add(Item("_Cleave Surface", new KeyGesture(Key.K, KeyModifiers.Control),
+        geometry.Items.Add(Item(CommandKeys.CleaveSurface, "_Cleave Surface", new KeyGesture(Key.K, KeyModifiers.Control),
             () => _view.CleaveSelectedSurface()));
         geometry.Items.Add(new Separator());
-        geometry.Items.Add(Item("Make _Adjoin (pick two)", new KeyGesture(Key.J, KeyModifiers.Control),
+        geometry.Items.Add(Item(CommandKeys.MakeAdjoin, "Make _Adjoin (pick two)", new KeyGesture(Key.J, KeyModifiers.Control),
             () => _view.MakeAdjoinStep()));
-        geometry.Items.Add(Item("_Remove Adjoin", new KeyGesture(Key.J, KeyModifiers.Control | KeyModifiers.Shift),
+        geometry.Items.Add(Item(CommandKeys.RemoveAdjoin, "_Remove Adjoin", new KeyGesture(Key.J, KeyModifiers.Control | KeyModifiers.Shift),
             () => _view.RemoveSelectedAdjoin()));
-        geometry.Items.Add(Item("_Bridge Two Surfaces", new KeyGesture(Key.B, KeyModifiers.Control),
+        geometry.Items.Add(Item(CommandKeys.BridgeSurfaces, "_Bridge Two Surfaces", new KeyGesture(Key.B, KeyModifiers.Control),
             () => _view.BridgeSelectedSurfaces()));
-        geometry.Items.Add(Item("Co_nnect Two Sectors", new KeyGesture(Key.B, KeyModifiers.Control | KeyModifiers.Shift),
+        geometry.Items.Add(Item(CommandKeys.ConnectSectors, "Co_nnect Two Sectors", new KeyGesture(Key.B, KeyModifiers.Control | KeyModifiers.Shift),
             () => _view.ConnectSelectedSectors()));
 
         return geometry;
@@ -1037,28 +1044,28 @@ public class MainWindow : Window
     {
         var texturing = new MenuItem { Header = "_Texturing" };
 
-        texturing.Items.Add(Item("Shift _Left", new KeyGesture(Key.Left, KeyModifiers.Control),
+        texturing.Items.Add(Item(CommandKeys.ShiftTextureLeft, "Shift _Left", new KeyGesture(Key.Left, KeyModifiers.Control),
             () => _view.ShiftSelectedTexture(-0.125, 0)));
-        texturing.Items.Add(Item("Shift _Right", new KeyGesture(Key.Right, KeyModifiers.Control),
+        texturing.Items.Add(Item(CommandKeys.ShiftTextureRight, "Shift _Right", new KeyGesture(Key.Right, KeyModifiers.Control),
             () => _view.ShiftSelectedTexture(0.125, 0)));
-        texturing.Items.Add(Item("Shift _Up", new KeyGesture(Key.Up, KeyModifiers.Control),
+        texturing.Items.Add(Item(CommandKeys.ShiftTextureUp, "Shift _Up", new KeyGesture(Key.Up, KeyModifiers.Control),
             () => _view.ShiftSelectedTexture(0, -0.125)));
-        texturing.Items.Add(Item("Shift _Down", new KeyGesture(Key.Down, KeyModifiers.Control),
+        texturing.Items.Add(Item(CommandKeys.ShiftTextureDown, "Shift _Down", new KeyGesture(Key.Down, KeyModifiers.Control),
             () => _view.ShiftSelectedTexture(0, 0.125)));
         texturing.Items.Add(new Separator());
-        texturing.Items.Add(Item("Scale U_p", new KeyGesture(Key.OemPlus, KeyModifiers.Control),
+        texturing.Items.Add(Item(CommandKeys.ScaleTextureUp, "Scale U_p", new KeyGesture(Key.OemPlus, KeyModifiers.Control),
             () => _view.ScaleSelectedTexture(1.0 / 0.9)));
-        texturing.Items.Add(Item("Scale Do_wn", new KeyGesture(Key.OemMinus, KeyModifiers.Control),
+        texturing.Items.Add(Item(CommandKeys.ScaleTextureDown, "Scale Do_wn", new KeyGesture(Key.OemMinus, KeyModifiers.Control),
             () => _view.ScaleSelectedTexture(0.9)));
         texturing.Items.Add(new Separator());
-        texturing.Items.Add(Item("Rotate _CW", new KeyGesture(Key.R, KeyModifiers.Control),
+        texturing.Items.Add(Item(CommandKeys.RotateTextureCw, "Rotate _CW", new KeyGesture(Key.R, KeyModifiers.Control),
             () => _view.RotateSelectedTexture(15)));
-        texturing.Items.Add(Item("Rotate CC_W", new KeyGesture(Key.R, KeyModifiers.Control | KeyModifiers.Shift),
+        texturing.Items.Add(Item(CommandKeys.RotateTextureCcw, "Rotate CC_W", new KeyGesture(Key.R, KeyModifiers.Control | KeyModifiers.Shift),
             () => _view.RotateSelectedTexture(-15)));
         texturing.Items.Add(new Separator());
-        texturing.Items.Add(Item("_Auto-fit to Surface", new KeyGesture(Key.T, KeyModifiers.Control),
+        texturing.Items.Add(Item(CommandKeys.AutoFitTexture, "_Auto-fit to Surface", new KeyGesture(Key.T, KeyModifiers.Control),
             () => _view.AutoTextureSelected()));
-        texturing.Items.Add(Item("Align to _Neighbour", new KeyGesture(Key.T, KeyModifiers.Control | KeyModifiers.Shift),
+        texturing.Items.Add(Item(CommandKeys.AlignTextureNeighbour, "Align to _Neighbour", new KeyGesture(Key.T, KeyModifiers.Control | KeyModifiers.Shift),
             () => _view.AlignSelectedTextureToNeighbour()));
 
         return texturing;
@@ -1067,18 +1074,22 @@ public class MainWindow : Window
     private MenuItem BuildToolsMenu()
     {
         var tools = new MenuItem { Header = "T_ools" };
-        tools.Items.Add(Item("Calculate _Lighting", new KeyGesture(Key.F9),
+        tools.Items.Add(Item(CommandKeys.CalculateLighting, "Calculate _Lighting", new KeyGesture(Key.F9),
             () => _view.CalculateLighting()));
-        tools.Items.Add(Item("Calculate Lighting (_no shadows)", new KeyGesture(Key.F9, KeyModifiers.Shift),
+        tools.Items.Add(Item(CommandKeys.CalculateLightingNoShadows, "Calculate Lighting (_no shadows)", new KeyGesture(Key.F9, KeyModifiers.Shift),
             () => _view.CalculateLighting(castShadows: false)));
         tools.Items.Add(new Separator());
-        tools.Items.Add(Item("Level _Header\u2026", null, ShowHeaderEditor));
-        tools.Items.Add(Item("_Find\u2026", new KeyGesture(Key.F, KeyModifiers.Control | KeyModifiers.Shift), ShowFind));
-        tools.Items.Add(Item("_Check Consistency\u2026", new KeyGesture(Key.F8), ShowConsistency));
+        tools.Items.Add(Item(null, "Level _Header\u2026", null, ShowHeaderEditor));
+        tools.Items.Add(Item(CommandKeys.Find, "_Find\u2026", new KeyGesture(Key.F, KeyModifiers.Control | KeyModifiers.Shift), ShowFind));
+        tools.Items.Add(Item(CommandKeys.CheckConsistency, "_Check Consistency\u2026", new KeyGesture(Key.F8), ShowConsistency));
         tools.Items.Add(new Separator());
-        tools.Items.Add(Item("Import _Dark Forces Level…", null, ImportDfLevel));
-        tools.Items.Add(Item("Import _3D Studio ASC…", null, ImportAsc));
-        tools.Items.Add(Item("E_xport Sector as 3DO…", null, ExportSectorAs3Do));
+        tools.Items.Add(Item(null, "_Key Bindings…", null, ShowKeyBindings));
+        tools.Items.Add(Item(null, "_Episode Editor…", null, ShowEpisodeEditor));
+        tools.Items.Add(Item(null, "3_DO Model Viewer…", null, ShowThreeDoViewer));
+        tools.Items.Add(new Separator());
+        tools.Items.Add(Item(null, "Import _Dark Forces Level…", null, ImportDfLevel));
+        tools.Items.Add(Item(null, "Import _3D Studio ASC…", null, ImportAsc));
+        tools.Items.Add(Item(null, "E_xport Sector as 3DO…", null, ExportSectorAs3Do));
         return tools;
     }
 
@@ -1210,6 +1221,24 @@ public class MainWindow : Window
         }
     }
 
+    /// <summary>Opens the command-key remapper.</summary>
+    private void ShowKeyBindings()
+    {
+        new KeyBindingsWindow(_settings, _bindings).ShowDialog(this);
+    }
+
+    /// <summary>Opens the episode editor (episode.jk + cogstrings.uni in the project dir).</summary>
+    private void ShowEpisodeEditor()
+    {
+        new EpisodeEditorWindow(_settings).ShowDialog(this);
+    }
+
+    /// <summary>Opens the 3DO model / KEY animation browser.</summary>
+    private void ShowThreeDoViewer()
+    {
+        new ThreeDoViewerWindow().ShowDialog(this);
+    }
+
     /// <summary>Opens the level-header editor for the loaded level.</summary>
     private void ShowHeaderEditor()
     {
@@ -1326,16 +1355,18 @@ public class MainWindow : Window
     }
 
     /// <summary>
-    /// Builds a menu item and — because Avalonia's <see cref="MenuItem.InputGesture"/>
-    /// is display-only — registers a matching window-level key binding so the
-    /// advertised shortcut actually fires. <see cref="VulkanView"/> handles these
-    /// keys first when it has focus and marks them handled, so they run once.
+    /// Builds a menu item for a configurable command and — because Avalonia's
+    /// <see cref="MenuItem.InputGesture"/> is display-only — registers matching
+    /// window-level key bindings so the advertised shortcut actually fires.
+    /// <see cref="VulkanView"/> resolves the same bindings when it has focus and
+    /// marks them handled, so they run exactly once.
     /// </summary>
-    private MenuItem Item(string header, KeyGesture? gesture, Action onClick)
+    private MenuItem Item(string? action, string header, KeyGesture? defaultGesture, Action onClick)
     {
-        var item = new MenuItem { Header = header, InputGesture = gesture };
+        var gestures = action is null ? Array.Empty<KeyGesture>() : _bindings.Gestures(action);
+        var item = new MenuItem { Header = header, InputGesture = gestures.FirstOrDefault() ?? defaultGesture };
         item.Click += (_, _) => onClick();
-        if (gesture is not null)
+        foreach (var gesture in gestures)
             KeyBindings.Add(new KeyBinding { Gesture = gesture, Command = new RelayCommand(onClick) });
         return item;
     }

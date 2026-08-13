@@ -38,6 +38,9 @@ public sealed class AppSettings
     /// <summary>Recently opened loose level files (most recent first).</summary>
     public List<string> RecentFiles { get; set; } = new();
 
+    /// <summary>Command-key overrides: action name → semicolon-separated gesture strings.</summary>
+    public Dictionary<string, string> KeyBindings { get; set; } = new();
+
     private static string ConfigPath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData,
             Environment.SpecialFolderOption.Create),
